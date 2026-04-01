@@ -16,15 +16,15 @@ graph TD
 
     subgraph Infrastructure Library
         LIBPSM2_C[libpsm2.c<br/>PSM2 Lifecycle Management]
-        LIBPSM2_H[libpsm2.h<br/>PSM2 API Wrappers & Inline Helpers]
-        PERF_C[psm2perf.c<br/>Benchmark Init, Socket, Config Exchange]
+        LIBPSM2_H[libpsm2.h<br/>PSM2 Wrapper API & Inline Helpers]
+        PERF_C[psm2perf.c<br/>Benchmark Init, Socket, Config]
         PERF_H[psm2perf.h<br/>Constants, Macros, Data Structures]
     end
 
     subgraph External Dependencies
-        PSM2_LIB[libpsm2 / PSM2 API<br/>psm2.h, psm2_mq.h]
-        SOCKETS[POSIX Sockets<br/>Out-of-Band Control Channel]
-        PROCFS[/proc/cpuinfo<br/>CPU Frequency Detection]
+        PSM2[PSM2 Library<br/>psm2.h / psm2_mq.h]
+        POSIX[POSIX Sockets & Timers]
+        PROC[/proc/cpuinfo]
     end
 
     LAT --> LIBPSM2_H
@@ -34,50 +34,54 @@ graph TD
     BIBW --> LIBPSM2_H
     BIBW --> PERF_H
 
-    LIBPSM2_C --> PSM2_LIB
+    LIBPSM2_C --> LIBPSM2_H
     LIBPSM2_C --> PERF_H
-    PERF_C --> SOCKETS
-    PERF_C --> PROCFS
+    PERF_C --> PERF_H
 
-    LIBPSM2_H --> PSM2_LIB
+    LIBPSM2_H --> PSM2
+    PERF_C --> POSIX
+    PERF_C --> PROC
 ```
 
 ## Key Flows
 
-### 1. Benchmark Initialization and PSM2 Connection Setup
+### 1. Benchmark Initialization and PSM2 Endpoint Setup
 
-This flow is common to all three benchmarks. The client process specifies the server hostname as a positional argument; the server process runs with no positional arguments. Both processes parse arguments, establish a TCP socket, exchange configuration, initialize PSM2, exchange endpoint IDs, and connect.
+This flow is common to all three benchmarks. The client process specifies the server hostname as a positional argument; the server process runs with no positional arguments. Both sides parse arguments, establish a TCP socket, exchange configuration, then initialize PSM2 endpoints and connect them.
 
 ```mermaid
 sequenceDiagram
     participant Server
     participant Client
+    participant TCP as TCP Socket
     participant PSM2 as PSM2 Library
 
-    Note over Server,Client: Both call init_benchmark(argc, argv)
-    Server->>Server: listen() on SERVER_PORT (33087)
-    Client->>Server: connect() to server hostname
-    Server->>Server: accept() connection
+    Server->>Server: init_benchmark(argc, argv)
+    Client->>Client: init_benchmark(argc, argv)
 
-    Note over Server,Client: exchange_info() over TCP
-    Client->>Server: SEND min_msg_sz, max_msg_sz, run_flush, show_mqstats
-    Server->>Server: RECV and apply client settings
+    Server->>TCP: open_socket() — bind, listen, accept
+    Client->>TCP: open_socket() — connect
 
-    Note over Server,Client: libpsm2_init() — PSM2 bootstrap
+    Client->>TCP: exchange_info() — SEND min/max_msg_sz, flags
+    TCP->>Server: exchange_info() — RECV min/max_msg_sz, flags
+
     Server->>PSM2: psm2_init(), psm2_ep_open()
     Client->>PSM2: psm2_init(), psm2_ep_open()
-    Server->>Client: SEND uuid (over TCP)
-    Client->>Client: RECV uuid, use for psm2_ep_open()
-    Server->>Client: SEND server epid (over TCP)
-    Client->>Server: SEND client epid (over TCP)
-    Server->>PSM2: psm2_ep_connect() with both epids
-    Client->>PSM2: psm2_ep_connect() with both epids
-    Note over Server,Client: PSM2 connection established
+
+    Server->>TCP: SEND uuid, SEND epid
+    TCP->>Client: RECV uuid, RECV epid
+    Client->>TCP: SEND epid
+    TCP->>Server: RECV epid
+
+    Server->>PSM2: psm2_ep_connect()
+    Client->>PSM2: psm2_ep_connect()
+
+    Note over Server,Client: PSM2 endpoints connected, ready for benchmark
 ```
 
 ### 2. Ping-Pong Latency Measurement
 
-The server sends a message and waits for a reply; the client receives and immediately echoes back. The server times the round-trip and divides by two to obtain one-way latency. Message sizes double from `min_msg_sz` to `max_msg_sz`.
+The server sends a message and waits for a reply; the client receives and immediately echoes back. The server times the round-trip over many iterations and divides by two to obtain one-way latency. Message sizes double from `min_msg_sz` to `max_msg_sz`.
 
 ```mermaid
 sequenceDiagram
@@ -85,31 +89,31 @@ sequenceDiagram
     participant Client
 
     Note over Server,Client: For each message size (doubling)
-    
-    loop Warmup (iter iterations)
+
+    loop Warmup iterations
         Server->>Client: post_send(sbuff, msize)
-        Client->>Client: post_irecv() + psm2_mq_wait()
         Client->>Server: post_send(sbuff, msize)
-        Server->>Server: post_irecv() + psm2_mq_wait()
     end
 
-    Note over Server: TIMER(time_start)
-    loop Timed (iter iterations)
-        Server->>Client: post_send(sbuff, msize)
-        Client->>Client: post_irecv() + psm2_mq_wait()
-        Client->>Server: post_send(sbuff, msize)
-        Server->>Server: post_irecv() + psm2_mq_wait()
-    end
-    Note over Server: TIMER(time_end)
+    Server->>Server: TIMER(time_start)
 
+    loop Measured iterations
+        Server->>Client: post_send(sbuff, msize)
+        Client->>Server: post_send(sbuff, msize)
+        Server->>Server: psm2_mq_wait()
+    end
+
+    Server->>Server: TIMER(time_end)
     Server->>Server: latency = ts_diff / iter / 2
-    Server->>Client: SEND latency (over TCP)
-    Note over Server,Client: Both print result
+
+    Server-->>Client: SEND latency via TCP
+    Server->>Server: printf(msize, latency)
+    Client->>Client: printf(msize, latency)
 ```
 
-### 3. Bidirectional Bandwidth / Message Rate Measurement
+### 3. Unidirectional Bandwidth / Message Rate Measurement
 
-Both sides simultaneously send and receive windows of messages. The server performs a warmup pass, then a timed pass. The client runs `2 * iter` iterations (covering both warmup and timed phases). Bandwidth and message rate are computed from the timed interval on the server and shared via TCP.
+The server sends a window of messages (64 at a time) using non-blocking 'post_isend', waits for all to complete via 'psm2_waitall', then waits for an ACK from the client. The client posts a window of receives, waits, and sends back an ACK. The server times the measured iterations and computes bandwidth and message rate.
 
 ```mermaid
 sequenceDiagram
@@ -118,35 +122,31 @@ sequenceDiagram
 
     Note over Server,Client: For each message size (doubling)
 
-    loop Warmup (iter iterations)
-        par Server sends & receives
-            Server->>Server: post_irecv() x WINDOW
-            Server->>Client: post_isend() x WINDOW
-            Server->>Server: psm2_waitall(sends), psm2_waitall(recvs)
-        and Client sends & receives
-            Client->>Client: post_irecv() x WINDOW
-            Client->>Server: post_isend() x WINDOW
-            Client->>Client: psm2_waitall(recvs), psm2_waitall(sends)
-        end
+    loop Warmup iterations
+        Server->>Client: post_isend × WINDOW (64)
+        Server->>Server: psm2_waitall(WINDOW)
+        Client->>Client: post_irecv × WINDOW, psm2_waitall
+        Client->>Server: post_send(ack)
+        Server->>Server: psm2_mq_wait(ack)
     end
 
-    Note over Server: TIMER(time_start)
-    loop Timed (iter iterations)
-        par Server sends & receives
-            Server->>Server: post_irecv() x WINDOW
-            Server->>Client: post_isend() x WINDOW
-            Server->>Server: psm2_waitall(sends), psm2_waitall(recvs)
-        and Client sends & receives
-            Client->>Client: post_irecv() x WINDOW
-            Client->>Server: post_isend() x WINDOW
-            Client->>Client: psm2_waitall(recvs), psm2_waitall(sends)
-        end
-    end
-    Note over Server: TIMER(time_end)
+    Server->>Server: TIMER(time_start)
 
-    Server->>Server: bw = 2 * msize * iter * WINDOW / elapsed
-    Server->>Client: SEND bw, mrate (over TCP)
-    Note over Server,Client: Both print result
+    loop Measured iterations
+        Server->>Client: post_isend × WINDOW (64)
+        Server->>Server: psm2_waitall(WINDOW)
+        Client->>Client: post_irecv × WINDOW, psm2_waitall
+        Client->>Server: post_send(ack)
+        Server->>Server: psm2_mq_wait(ack)
+    end
+
+    Server->>Server: TIMER(time_end)
+    Server->>Server: bw = msize / te * iter * WINDOW * 1000
+    Server->>Server: mrate = bw / msize
+
+    Server-->>Client: SEND bw, mrate via TCP
+    Server->>Server: printf results
+    Client->>Client: printf results
 ```
 
 ## Data Model
@@ -160,51 +160,52 @@ The central configuration structure shared between server and client:
 | `cpu_freq` | `double` | CPU frequency in Hz, read from `/proc/cpuinfo` |
 | `hostname` | `char[256]` | Local hostname |
 | `server` | `char[256]` | Server hostname (used for socket connection) |
-| `is_server` | `int` | 1 if this process is the server, 0 if client |
-| `partner` | `int` | PSM2 rank index of the remote peer (server=1, client=0) |
-| `min_msg_sz` | `long` | Starting message size in bytes (default 1) |
-| `max_msg_sz` | `long` | Ending message size in bytes (default 4 MiB) |
+| `is_server` | `int` | 1 if this process is the server, 0 for client |
+| `partner` | `int` | PSM2 rank of the communication partner (0 or 1) |
+| `min_msg_sz` | `long` | Minimum message size in bytes (default 1) |
+| `max_msg_sz` | `long` | Maximum message size in bytes (default 4 MiB) |
 | `run_flush` | `int` | Whether to flush L3 cache before benchmarking |
-| `show_mqstats` | `int` | Whether to print PSM2 MQ statistics after benchmarking |
-
-### Global PSM2 State (defined in `libpsm2.c`, declared in `libpsm2.h`)
-
-| Variable | Type | Description |
-|---|---|---|
-| `libpsm2_ep` | `psm2_ep_t` | The local PSM2 endpoint handle |
-| `libpsm2_mq` | `psm2_mq_t` | The PSM2 matched queue handle |
-| `libpsm2_epaddrs` | `psm2_epaddr_t*` | Array of resolved endpoint addresses (size `MAX_PSM2_RANKS` = 2) |
-| `libpsm2_rank` | `int` | Local rank (server=0, client=1) |
+| `show_mqstats` | `int` | Whether to print PSM2 MQ statistics after run |
 
 ### Global Buffers (defined in `psm2perf.h`)
 
-| Variable | Type | Description |
-|---|---|---|
-| `sbuff` | `char[MAX_MSG_SZ]` | Send buffer (4 MiB, statically allocated) |
-| `rbuff` | `char[MAX_MSG_SZ]` | Receive buffer (4 MiB, statically allocated) |
+| Symbol | Type | Size | Description |
+|---|---|---|---|
+| `sbuff` | `char[]` | `MAX_MSG_SZ` (4 MiB) | Send buffer for all benchmarks |
+| `rbuff` | `char[]` | `MAX_MSG_SZ` (4 MiB) | Receive buffer for all benchmarks |
 
-### Benchmark Constants
+### PSM2 State (managed in `libpsm2.c`)
 
-| Constant | Value | Description |
+| Symbol | Type | Description |
 |---|---|---|
-| `WINDOW` | 64 | Number of outstanding send/recv operations per iteration |
+| `libpsm2_ep` | `psm2_ep_t` | The local PSM2 endpoint |
+| `libpsm2_mq` | `psm2_mq_t` | The PSM2 matched queue |
+| `libpsm2_epaddrs` | `psm2_epaddr_t*` | Array of resolved endpoint addresses (size `MAX_PSM2_RANKS` = 2) |
+| `libpsm2_rank` | `int` | Local rank: 0 for server, 1 for client |
+
+### Key Constants (defined in `psm2perf.h`)
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `WINDOW` | 64 | Number of outstanding messages in bandwidth tests |
 | `ITERS_LARGE` | 50,000 | Iteration count for small messages |
-| `ITERS_MEDIUM` | 500 | Iteration count for unidirectional BW small messages |
+| `ITERS_MEDIUM` | 500 | Iteration count for uni-directional BW small messages |
 | `ITERS_SMALL` | 50 | Iteration count for large messages (> 64 KiB) |
 | `LARGE_MSG` | 65,536 | Threshold for switching iteration counts |
 | `SERVER_PORT` | 33,087 | TCP port for out-of-band coordination |
+| `MAX_PSM2_RANKS` | 2 | Only two-process benchmarks supported |
 
 ## Dependencies
 
 | Dependency | Purpose | Version |
 |---|---|---|
-| `libpsm2` (`psm2.h`, `psm2_mq.h`) | PSM2 messaging API for OPA fabric communication | `PSM2_VERNO_MAJOR` / `PSM2_VERNO_MINOR` (runtime negotiated) |
-| POSIX Sockets (`sys/socket.h`, `netinet/in.h`, `netdb.h`) | Out-of-band TCP control channel between server and client | POSIX |
+| `psm2` (`psm2.h`, `psm2_mq.h`) | PSM2 endpoint management, matched queue messaging | System-installed (matches `PSM2_VERNO_MAJOR`/`PSM2_VERNO_MINOR`) |
+| POSIX Sockets (`sys/socket.h`, `netinet/in.h`, `netdb.h`) | Out-of-band TCP coordination between server and client | POSIX |
 | `clock_gettime` (`time.h`, `CLOCK_MONOTONIC`) | High-resolution timing for benchmark measurements | POSIX |
 | `sysconf` (`unistd.h`, `_SC_LEVEL3_CACHE_SIZE`) | L3 cache size detection for cache flush | POSIX |
-| `/proc/cpuinfo` | CPU frequency detection via `get_cpu_rate()` | Linux procfs |
-| `getopt_long` (`getopt.h`) | Command-line argument parsing | GNU C Library |
-| Standard C Library (`stdio.h`, `stdlib.h`, `string.h`, `errno.h`) | General utilities | C99 |
+| `/proc/cpuinfo` | CPU frequency detection via `get_cpu_rate()` | Linux |
+| `getopt_long` (`getopt.h`) | Command-line argument parsing | GNU/POSIX |
+| Standard C library (`stdlib.h`, `stdio.h`, `string.h`, `errno.h`) | Memory allocation, I/O, string operations | C99 |
 
 ## Configuration
 
@@ -212,65 +213,56 @@ The central configuration structure shared between server and client:
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
-| `[server]` | Positional | *(none — makes this process the server)* | Server hostname; providing it designates this process as the client |
-| `-m` | Option | `1` | Starting message size in bytes |
-| `-M` | Option | `4194304` (4 MiB) | Ending message size in bytes |
+| `[server]` | Positional | *(none — makes this process the server)* | Server hostname; presence makes this process the client |
+| `-m` | Option | `1` | Minimum message size in bytes |
+| `-M` | Option | `4194304` (4 MiB) | Maximum message size in bytes |
 | `-f` / `--flush` | Flag | Off | Flush L3 cache before running the benchmark |
 | `--mqstats` | Flag | Off | Print PSM2 MQ statistics after the benchmark |
-| `-h` / `--help` | Flag | — | Print usage information |
+| `-h` / `--help` | Flag | — | Print usage and exit |
 
-### Hardcoded Configuration
+### Implicit Configuration
 
-| Parameter | Value | Location |
+| Item | Source | Description |
 |---|---|---|
-| `SERVER_PORT` | 33087 | `psm2perf.h` |
-| `MAX_PSM2_RANKS` | 2 | `libpsm2.h` |
-| `WINDOW` | 64 | `psm2perf.h` |
-| `MAX_MSG_SZ` | 4 MiB | `psm2perf.h` |
-| `PSM2_TAG` / `PSM2_TAGSEL` | `0xF` | `libpsm2.h` |
+| CPU frequency | `/proc/cpuinfo` (`cpu MHz` field) | Read at startup; stored in `benchmark_info.cpu_freq` but not directly used in timing (timing uses `CLOCK_MONOTONIC`) |
+| L3 cache size | `sysconf(_SC_LEVEL3_CACHE_SIZE)` | Used for cache flush; falls back to hardcoded 28 MiB if sysconf fails |
+| `SERVER_PORT` | Hardcoded `33087` | TCP port for out-of-band socket |
 
 ### Environment Variables
 
-No environment variables are explicitly read by this module. However, the underlying `libpsm2` library respects numerous `PSM2_*` environment variables (e.g., `PSM2_DEVICES`, `PSM2_TRACEMASK`) which affect runtime behavior.
+No environment variables are explicitly read by this module. PSM2 itself may honor environment variables (e.g., `PSM2_DEVICES`, `HFI_UNIT`), but those are external to this codebase.
 
 ## Error Handling
 
-The module uses a consistent **goto-bail** error handling pattern across all files:
+The module uses a consistent **goto-bail** error handling pattern throughout:
 
-- **`libpsm2_init()`**: Each PSM2 API call is checked against `PSM2_OK`. On failure, the `PSM2_ERR` macro prints the PSM2 error string to stderr, and execution jumps to a `bail` label that frees all allocated resources, finalizes any partially-initialized PSM2 state, and returns `-1`.
+- **`init_benchmark()`**: Returns `NULL` on any parsing or system call failure; the caller checks for `NULL` and exits.
+- **`libpsm2_init()`**: Each PSM2 API call is checked against `PSM2_OK`. On failure, the `PSM2_ERR` macro prints the PSM2 error string to stderr, and control jumps to a `bail` label that frees allocated resources, finalizes any partially-initialized PSM2 state, and returns `-1`.
+- **`open_socket()`**: Each socket operation (`bind`, `listen`, `accept`, `connect`) is checked; failures print via `perror()` and jump to `bail` which closes the socket.
+- **`SEND` / `RECV` macros**: These macros wrap `send()`/`recv()` calls and `goto bail` on failure, printing via `perror()`. This means any function using these macros **must** have a `bail` label in scope.
+- **`libpsm2_shutdown()`**: Explicitly notes in a comment that `psm2_mq_finalize` errors are logged but not propagated.
+- **Benchmark run functions** (`run_latency`, `run_bw_mrate`, `run_bi_bw_mrate`): Each has a `bail` label returning `-1`, reachable via the `SEND`/`RECV` macros, though the main measurement loops themselves do not check individual PSM2 send/receive return values.
 
-- **`init_benchmark()`**: Argument parsing errors, `gethostname()` failures, and CPU frequency detection failures all jump to `bail`, which frees the `benchmark_info` struct and returns `NULL`.
-
-- **`open_socket()`**: Socket operations (`socket()`, `bind()`, `listen()`, `accept()`, `connect()`) are individually checked. Failures print via `perror()` and jump to `bail`, which closes the socket and returns `-1`.
-
-- **`SEND` / `RECV` macros**: These macros wrap `send()` / `recv()` calls and jump to `bail` on failure via `goto`. This means any function using these macros **must** have a `bail` label in scope.
-
-- **`main()` functions**: Each benchmark's `main()` follows the same pattern — check return values, `goto bail` on error, clean up socket and `benchmark_info` in the bail block.
-
-- **`libpsm2_shutdown()`**: Logs but does not propagate `psm2_mq_finalize()` errors, as noted in the source comment.
-
-There is no custom exception hierarchy; error signaling is purely via integer return codes (`0` for success, `-1` for failure) and `NULL` pointer returns.
+There is no custom exception hierarchy; error reporting relies on `perror()`, `fprintf(stderr, ...)`, and the `PSM2_ERR` macro.
 
 ## Known Limitations / Technical Debt
 
-1. **Hardcoded `SERVER_PORT` (33087)**: The TCP port is a compile-time constant in `psm2perf.h`. There is no command-line option or environment variable to override it, which can cause conflicts in multi-user environments.
+1. **Hardcoded TCP port**: `SERVER_PORT` is hardcoded to `33087` in `psm2perf.h`. There is no command-line option or environment variable to override it, which can cause conflicts in shared environments.
 
-2. **`MAX_PSM2_RANKS` fixed at 2**: The suite only supports exactly two processes (one server, one client). Multi-node or multi-process scaling tests are not possible without code changes.
+2. **Hardcoded L3 cache fallback**: When `sysconf(_SC_LEVEL3_CACHE_SIZE)` fails, the code falls back to a hardcoded `28 * 1024 * 1024` bytes (28 MiB), which may not match the actual hardware.
 
-3. **Server socket file descriptor leak in `open_socket()`**: When `is_server` is true, the original listening socket returned by `socket()` is overwritten by the `accept()` return value. The listening socket is never closed.
+3. **MAX_PSM2_RANKS fixed at 2**: The comment in `libpsm2.h` states "only one server/client supported now." The architecture does not support multi-node or multi-process benchmarks without rework.
 
-4. **`SEND`/`RECV` macros assume complete transfer**: The macros call `send()` / `recv()` once and assume the entire `sizeof(type)` bytes are transferred. Partial sends/receives are not handled, which could cause subtle data corruption on congested or slow TCP connections.
+4. **Missing error handling on PSM2 send/receive in benchmark loops**: The inline wrappers `post_isend()`, `post_irecv()`, and `post_send()` in `libpsm2.h` discard the return value of `psm2_mq_isend()`, `psm2_mq_irecv()`, and `psm2_mq_send()`. Errors during the measurement phase would go undetected.
 
-5. **Global mutable state**: `sbuff`, `rbuff`, and `server_name` are declared as non-`static` globals in `psm2perf.h`, a header included by multiple translation units. This works only because each benchmark compiles into a separate executable, but would cause linker errors if combined.
+5. **Global mutable buffers declared in a header**: `sbuff`, `rbuff`, and `server_name` are defined (not merely declared) in `psm2perf.h`. Since this header is included by multiple translation units, this relies on C tentative definition rules and would cause linker errors in C++ or with stricter compilers. These should be declared `extern` in the header and defined in a single `.c` file.
 
-6. **`libpsm2_mpi_rank` declared but never defined**: `libpsm2.h` declares `extern int libpsm2_mpi_rank`, but the implementation in `libpsm2.c` defines `int libpsm2_rank` instead. This is a naming mismatch; any code referencing `libpsm2_mpi_rank` would fail to link.
+6. **Declared but unused extern**: `libpsm2.h` declares `extern int libpsm2_mpi_rank` but the actual global defined in `libpsm2.c` is `libpsm2_rank` (no `_mpi_` prefix). The declared extern is never defined or used.
 
-7. **`rank` parameter unused in `post_irecv()`**: The `rank` parameter is accepted but never used in the inline function body — `psm2_mq_irecv()` does not take a source address. This is misleading to callers.
+7. **`cpu_freq` computed but unused for timing**: The CPU frequency is read from `/proc/cpuinfo` and stored in `benchmark_info`, but all timing is done via `CLOCK_MONOTONIC` / `ts_diff()`. The `get_cycles()` inline function using `rdtsc` is also defined but never called. This is dead code.
 
-8. **CPU frequency read from `/proc/cpuinfo` but never used in timing**: The `cpu_freq` field is populated via `get_cpu_rate()` but is not referenced by any benchmark calculation. All timing uses `CLOCK_MONOTONIC` via `clock_gettime()`. The `get_cycles()` inline (using `rdtsc`) is also defined but never called. These appear to be vestigial from an earlier cycle-counter-based timing approach.
+8. **Socket resource leak in server path**: In `open_socket()`, when `is_server` is true, the original listening socket file descriptor is overwritten by the `accept()` return value and is never closed.
 
-9. **No data validation on received messages**: Benchmark buffers (`sbuff`, `rbuff`) are uninitialized and never verified for correctness. This is acceptable for performance testing but means the suite cannot detect silent data corruption.
+9. **Partial `recv()` not handled**: The `RECV` macro calls `recv()` once and checks only for `-1`. It does not handle partial reads (where `recv` returns fewer bytes than `sizeof(type)`), which can occur on TCP streams, potentially causing data corruption in the configuration exchange.
 
-10. **Unreachable `bail` labels**: In `run_latency()`, `run_bw_mrate()`, and `run_bi_bw_mrate()`, the `bail` label after `return 0` is unreachable under normal flow — it exists solely to satisfy the `SEND`/`RECV` macro `goto bail` pattern.
-
-11. **`.hypatia-test` file**: This is a trivial test marker file with no functional content.
+10. **`.hypatia-test` file**: This is a trivial test marker file containing a single descriptive line. It has no functional role in the module.
