@@ -1,0 +1,23 @@
+PSM2 Connection Test Tool
+
+Verifies PSM2 connectivity, data integrity, and tag-matching over the
+OPA fabric.  Uses the same libpsm2/psm2perf infrastructure as the
+existing latency and bandwidth benchmarks.
+
+Tests:
+  ping_pong       - round-trip message exchange (64 B, 100 iters)
+  data_integrity  - send/recv with deterministic fill-pattern verification
+  tag_match       - concurrent sends on different tags, verify isolation
+
+Build:
+  cd test_tool && make
+
+Run:
+  Server:   ./test_tool
+  Client:   ./test_tool <server-hostname>
+  All tests: ./test_tool <server-hostname> -a
+  Custom size: ./test_tool <server-hostname> -s 65536 -a
+
+Exit codes:
+  0 = all tests passed
+  1 = one or more failures
