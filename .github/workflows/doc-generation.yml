@@ -136,12 +136,20 @@ jobs:
                 impactRows
               ].join('\n');
 
+              const repo = context.repo.owner + '/' + context.repo.repo;
+              const branch = data.head_branch || context.payload.pull_request.head.ref;
+
               const docSections = (data.generated_docs || []).map(doc => {
                 const chars = (doc.content_length || 0).toLocaleString();
                 const fullContent = doc.content || doc.content_preview || '';
+                const blobUrl = `https://github.com/${repo}/blob/${branch}/${doc.path}`;
+                const rawUrl = `https://github.com/${repo}/blob/${commitSha}/${doc.path}`;
                 return [
+                  `### 📄 [\`${doc.path}\`](${blobUrl})`,
+                  `> ${chars} chars — record \`${doc.record_id}\` — [view rendered](${blobUrl}) · [view at commit](${rawUrl})`,
+                  '',
                   '<details>',
-                  `<summary><strong>${doc.path}</strong> (${chars} chars) — record <code>${doc.record_id}</code></summary>`,
+                  '<summary>Full content (click to expand)</summary>',
                   '',
                   fullContent,
                   '',
@@ -157,21 +165,20 @@ jobs:
                 : `Generated ${docCount} doc(s) (not committed).`;
 
               body = [
-                '## Documentation Generated',
+                '## 📚 Documentation Generated',
                 '',
                 statusLine,
                 '',
-                '### Impact',
+                '### Impact Analysis',
                 impactTable,
                 '',
-                '### Generated Documents',
-                'Expand each section to review the full content:',
+                '---',
                 '',
                 docSections,
                 '',
                 '---',
                 '> **Review required**: The `hypatia/documentation` status check is pending.',
-                '> Approve this PR to mark docs as accepted and unblock merge.'
+                '> Approve this PR to mark documentation as accepted and unblock merge.'
               ].join('\n');
             }
 
