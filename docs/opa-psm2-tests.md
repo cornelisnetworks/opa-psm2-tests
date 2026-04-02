@@ -55,7 +55,7 @@ The `test_tool` utility complements the performance benchmarks by providing func
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `server` (positional) | string | *(none — act as server)* | Hostname or IP of the server node. When omitted, the process becomes the server. |
-| `-s` | integer | `4096` | Message size in bytes for the data-integrity test. Valid range: `1` to `1048576` (1 MiB). |
+| `-s` | integer | `4096` | Message size in bytes for the `data_integrity` test. Valid range: `1` to `1048576` (1 MiB). |
 | `-a` | boolean | off | Run **all** tests. Without this flag, only the `ping_pong` test executes. |
 | `-h` | boolean | off | Print usage information and exit. |
 
