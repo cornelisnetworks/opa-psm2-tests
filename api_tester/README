@@ -1,0 +1,58 @@
+PSM2 API Tester
+===============
+
+A minimal REST API server that wraps PSM2 messaging operations.  Enables
+remote initialization of PSM2 endpoints, tagged send/receive, MQ statistics
+retrieval, and graceful shutdown — all via HTTP.
+
+Intended for integration testing and remote orchestration of PSM2 benchmarks
+without SSH access to test nodes.
+
+BUILD
+-----
+Requires libpsm2-devel headers (same as the parent benchmarks).
+
+    cd api_tester && make
+
+USAGE
+-----
+Start the server on one node:
+
+    ./api_tester -p 8080
+
+ENDPOINTS
+---------
+    GET  /v1/health     Service liveness check
+    GET  /v1/status     PSM2 connection state, role, uptime
+    GET  /v1/stats      PSM2 MQ statistics (rx/tx bytes, counts)
+    POST /v1/init       Initialize PSM2 (body: {"partner":"host","role":"server"})
+    POST /v1/shutdown   Tear down PSM2 endpoint
+    POST /v1/send       Send tagged message (body: {"tag":15,"size":64,"rank":0})
+    POST /v1/recv       Receive tagged message (body: {"tag":15,"size":64,"rank":0})
+
+EXAMPLE SESSION
+---------------
+Terminal 1 (server node):
+
+    $ ./api_tester
+    PSM2 API Tester v1.0.0 listening on port 8080
+
+Terminal 2 (from any host):
+
+    $ curl http://server:8080/v1/health
+    {"ok":true,"service":"psm2-api","version":"1.0.0"}
+
+    $ curl -X POST http://server:8080/v1/init \
+        -d '{"partner":"client-host","role":"server"}'
+    {"ok":true,"role":"server","partner":"client-host","cpu_freq_ghz":2.10}
+
+    $ curl http://server:8080/v1/stats
+    {"ok":true,"rx_user_bytes":0,...}
+
+    $ curl -X POST http://server:8080/v1/shutdown
+    {"ok":true,"message":"PSM2 shutdown complete"}
+
+ARGUMENTS
+---------
+    -p port     HTTP listen port (default 8080)
+    -h          Show help
