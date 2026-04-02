@@ -1,3 +1,9 @@
+---
+title: "Opa Psm2 Tests User Guide"
+date: "2026-04-02"
+status: "draft"
+---
+
 # Opa Psm2 Tests — User Guide
 
 ---
@@ -330,6 +336,13 @@ paste uni-bw.txt bi-bw.txt
 
 !!! warning "Partial execution"
     If a benchmark or test tool exits with a non-zero code due to an initialization error (e.g., socket failure, PSM2 endpoint open failure), no results are printed. Check `stderr` for diagnostic messages from `perror()` or the `PSM2_ERR` macro in this case.
+
+## BREAKING CHANGES
+
+No breaking changes have been introduced in the current release. The following items are noted for awareness:
+
+- The `README` file has been replaced with a short pointer to the `docs/` directory. Users who previously relied on the `README` for usage instructions should now consult this user guide and the companion [Test Tool Design Reference](test-tool.md).
+- The `test_tool` executable uses TCP port `33088` (`SERVER_PORT + 1`), which differs from the benchmark port `33087`. Firewall rules that previously only opened port `33087` must be updated to also allow `33088` when running the test tool.
 
 ## SEE ALSO
 
