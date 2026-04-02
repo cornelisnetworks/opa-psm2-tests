@@ -30,13 +30,14 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Call Hypatia doc review
-        id: hypatia
+      - name: Submit doc generation job
+        id: submit
         run: |
           HYPATIA_URL="${{ secrets.HYPATIA_API_URL }}"
           if [ -z "$HYPATIA_URL" ]; then
             HYPATIA_URL="https://hypatia.cn-agents.com"
           fi
+          echo "hypatia_url=$HYPATIA_URL" >> "$GITHUB_OUTPUT"
 
           RESPONSE=$(curl -sf -X POST \
             "${HYPATIA_URL}/v1/docs/pr-review" \
@@ -47,36 +48,66 @@ jobs:
               "target_dir": "docs",
               "dry_run": false
             }' \
-            --max-time 600 \
+            --max-time 30 \
             --retry 1 \
-            --retry-delay 10 \
             2>/dev/null) || {
-            echo "::warning::Hypatia API call failed — skipping doc generation"
+            echo "::warning::Hypatia API unreachable"
             echo "api_ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
 
-          echo "$RESPONSE" > /tmp/hypatia_response.json
-
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id // empty')
           OK=$(echo "$RESPONSE" | jq -r '.ok // false')
-          DOC_COUNT=$(echo "$RESPONSE" | jq -r '.data.generated_docs | length // 0')
-          COMMITTED=$(echo "$RESPONSE" | jq -r '.data.files_committed // false')
-          COMMIT_SHA=$(echo "$RESPONSE" | jq -r '.data.commit_sha // empty')
-          IMPACT=$(echo "$RESPONSE" | jq -r '.data.impact_summary // "no impact"')
-
-          echo "::notice::Hypatia: $IMPACT"
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
           echo "api_ok=$OK" >> "$GITHUB_OUTPUT"
-          echo "doc_count=$DOC_COUNT" >> "$GITHUB_OUTPUT"
-          echo "committed=$COMMITTED" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Poll for completion
+        if: steps.submit.outputs.api_ok == 'true' && steps.submit.outputs.job_id != ''
+        id: poll
+        run: |
+          HYPATIA_URL="${{ steps.submit.outputs.hypatia_url }}"
+          JOB_ID="${{ steps.submit.outputs.job_id }}"
+          POLL_URL="${HYPATIA_URL}/v1/docs/pr-review/${JOB_ID}"
+
+          for i in $(seq 1 60); do
+            sleep 15
+            RESULT=$(curl -sf --max-time 10 "$POLL_URL" 2>/dev/null) || continue
+
+            STATUS=$(echo "$RESULT" | jq -r '.status // "unknown"')
+            echo "Poll $i: status=$STATUS"
+
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+              echo "$RESULT" > /tmp/hypatia_response.json
+
+              OK=$(echo "$RESULT" | jq -r '.ok // false')
+              DOC_COUNT=$(echo "$RESULT" | jq -r '.data.generated_docs | length // 0')
+              COMMITTED=$(echo "$RESULT" | jq -r '.data.files_committed // false')
+              COMMIT_SHA=$(echo "$RESULT" | jq -r '.data.commit_sha // empty')
+              IMPACT=$(echo "$RESULT" | jq -r '.data.impact_summary // "no impact"')
+              ERROR_MSG=$(echo "$RESULT" | jq -r '.error // empty')
+
+              echo "::notice::Hypatia: $IMPACT"
+              echo "api_ok=$OK" >> "$GITHUB_OUTPUT"
+              echo "doc_count=$DOC_COUNT" >> "$GITHUB_OUTPUT"
+              echo "committed=$COMMITTED" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+              echo "error=$ERROR_MSG" >> "$GITHUB_OUTPUT"
+              echo "done=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "::warning::Hypatia job timed out after 15 minutes"
+          echo "api_ok=false" >> "$GITHUB_OUTPUT"
+          echo "done=true" >> "$GITHUB_OUTPUT"
 
       - name: Post summary comment
-        if: steps.hypatia.outputs.api_ok == 'true'
+        if: steps.poll.outputs.api_ok == 'true'
         uses: actions/github-script@v7
         env:
-          DOC_COUNT: ${{ steps.hypatia.outputs.doc_count }}
-          COMMITTED: ${{ steps.hypatia.outputs.committed }}
-          COMMIT_SHA: ${{ steps.hypatia.outputs.commit_sha }}
+          DOC_COUNT: ${{ steps.poll.outputs.doc_count }}
+          COMMITTED: ${{ steps.poll.outputs.committed }}
+          COMMIT_SHA: ${{ steps.poll.outputs.commit_sha }}
         with:
           script: |
             const fs = require('fs');
@@ -157,12 +188,16 @@ jobs:
               });
             }
 
-      - name: Post API-unreachable warning
-        if: steps.hypatia.outputs.api_ok == 'false'
+      - name: Post failure comment
+        if: steps.submit.outputs.api_ok == 'false' || (steps.poll.outputs.done == 'true' && steps.poll.outputs.api_ok != 'true')
         uses: actions/github-script@v7
+        env:
+          ERROR_MSG: ${{ steps.poll.outputs.error }}
         with:
           script: |
-            const body = '**Hypatia**: Documentation generation unavailable — API did not respond.';
+            const errorMsg = process.env.ERROR_MSG;
+            const detail = errorMsg ? `: ${errorMsg}` : ' — API did not respond.';
+            const body = `**Hypatia**: Documentation generation unavailable${detail}`;
             const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number, owner: context.repo.owner,
               repo: context.repo.repo, per_page: 100
