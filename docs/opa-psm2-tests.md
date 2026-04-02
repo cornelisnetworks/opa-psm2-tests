@@ -1,224 +1,347 @@
-# Opa Psm2 Tests — Design Reference
+# Opa Psm2 Tests — User Guide
 
-## Module Overview
+---
 
-The `opa-psm2-tests` module is a performance benchmarking suite for the PSM2 (Performance Scaled Messaging 2) communication library used with Cornelis Networks / Intel Omni-Path Architecture (OPA) fabric adapters. It provides three distinct micro-benchmarks — ping-pong latency, unidirectional bandwidth with message rate, and bidirectional bandwidth with message rate — all built on a shared infrastructure layer. The infrastructure handles PSM2 endpoint lifecycle management, TCP-based out-of-band coordination between a server and client process, command-line argument parsing, and common timing/utility functions. The suite is designed for two-process (one server, one client) operation across an OPA fabric link.
+## NAME
 
-## Component Diagram
+**opa-psm2-tests** — PSM2 performance benchmarking and connectivity testing suite for Cornelis Networks Omni-Path Architecture (OPA) fabrics.
 
-```mermaid
-graph TD
-    subgraph Benchmark Executables
-        LAT[latency.c<br/>Ping-Pong Latency]
-        BW[bw-mrate.c<br/>Unidirectional BW & MRate]
-        BIBW[bi-bw-mrate.c<br/>Bidirectional BW & MRate]
-    end
+## SYNOPSIS
 
-    subgraph Infrastructure Library
-        LIBPSM2_C[libpsm2.c<br/>PSM2 Lifecycle Management]
-        LIBPSM2_H[libpsm2.h<br/>PSM2 Wrapper API & Inline Helpers]
-        PERF_C[psm2perf.c<br/>Benchmark Init, Sockets, Config]
-        PERF_H[psm2perf.h<br/>Constants, Macros, Data Structures]
-    end
-
-    subgraph External Dependencies
-        PSM2[PSM2 Library<br/>psm2.h / psm2_mq.h]
-        POSIX[POSIX Sockets & Timers]
-        PROC[/proc/cpuinfo]
-    end
-
-    LAT --> LIBPSM2_H
-    LAT --> PERF_H
-    BW --> LIBPSM2_H
-    BW --> PERF_H
-    BIBW --> LIBPSM2_H
-    BIBW --> PERF_H
-
-    LIBPSM2_C --> PSM2
-    LIBPSM2_C --> PERF_H
-    PERF_C --> POSIX
-    PERF_C --> PROC
-    LIBPSM2_H --> PSM2
+```text
+latency [server] [-m size] [-M size] [-f --flush] [--mqstats] [-h --help]
+bw-mrate [server] [-m size] [-M size] [-f --flush] [--mqstats] [-h --help]
+bi-bw-mrate [server] [-m size] [-M size] [-f --flush] [--mqstats] [-h --help]
+test_tool [server] [-s size] [-a] [-h]
 ```
 
-## Key Flows
+## DESCRIPTION
 
-### 1. Benchmark Initialization and PSM2 Endpoint Setup
+`opa-psm2-tests` is a collection of PSM2 (Performance Scaled Messaging 2) micro-benchmarks and diagnostic tools for Cornelis Networks / Intel Omni-Path Architecture fabric adapters. The suite provides four standalone executables — a ping-pong latency benchmark, a unidirectional bandwidth and message rate benchmark, a bidirectional bandwidth and message rate benchmark, and a connection test tool — all built on a shared infrastructure layer that manages PSM2 endpoint lifecycle, TCP-based out-of-band coordination, command-line argument parsing, and high-resolution timing.
 
-This flow is common to all three benchmarks. The client and server processes parse arguments, establish a TCP socket for out-of-band coordination, exchange benchmark parameters, then initialize PSM2 — generating a UUID, opening endpoints, exchanging endpoint IDs over the socket, and connecting the PSM2 endpoints to each other.
+Each benchmark operates in a two-process client/server model across an OPA fabric link. One node runs in server mode (no positional argument) while the other runs in client mode (passing the server hostname as a positional argument). A TCP socket is established first to exchange PSM2 endpoint addresses and benchmark parameters, after which all performance-critical traffic flows over the native OPA fabric path using the PSM2 Matched Queue (MQ) API. Message sizes are swept in powers of two from a configurable minimum to maximum, and results are reported in tabular format suitable for scripted collection and analysis.
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Server
-    participant TCP as TCP Socket
-    participant PSM2 as PSM2 Library
+The `test_tool` utility complements the performance benchmarks by providing functional validation of PSM2 connectivity, data integrity, and tag-matching correctness. It is designed for fabric bring-up verification and CI pipeline integration, reporting PASS/FAIL/SKIP status for each test and returning a non-zero exit code on any failure.
 
-    Client->>Client: init_benchmark(argc, argv)
-    Server->>Server: init_benchmark(argc, argv)
-    Server->>TCP: bind, listen, accept
-    Client->>TCP: connect to server
-    Client->>TCP: SEND(min_msg_sz, max_msg_sz, run_flush, show_mqstats)
-    TCP->>Server: RECV(min_msg_sz, max_msg_sz, run_flush, show_mqstats)
-    Server->>PSM2: psm2_init(), psm2_ep_open()
-    Client->>PSM2: psm2_init(), psm2_ep_open()
-    Server->>TCP: SEND(uuid)
-    TCP->>Client: RECV(uuid)
-    Server->>TCP: SEND(server_epid)
-    Client->>TCP: SEND(client_epid)
-    TCP->>Client: RECV(server_epid)
-    TCP->>Server: RECV(client_epid)
-    Server->>PSM2: psm2_ep_connect()
-    Client->>PSM2: psm2_ep_connect()
-    Note over Server,Client: PSM2 endpoints connected, ready for benchmark
+## SUBCOMMANDS
+
+`opa-psm2-tests` ships as four separate executables rather than a single binary with subcommands. Each executable is invoked directly.
+
+| Executable | Description |
+|---|---|
+| `latency` | Measures ping-pong round-trip latency across message sizes, reporting one-way latency in microseconds. |
+| `bw-mrate` | Measures unidirectional bandwidth (MB/s) and message rate (Mmps) using windowed asynchronous sends with ACK synchronization. |
+| `bi-bw-mrate` | Measures bidirectional bandwidth (MB/s) and message rate (Mmps) with both endpoints sending and receiving simultaneously. |
+| `test_tool` | Validates PSM2 connectivity, data integrity, and tag-match isolation. Reports PASS/FAIL/SKIP per test. |
+
+## OPTIONS
+
+### Performance Benchmark Options (latency, bw-mrate, bi-bw-mrate)
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `server` (positional) | string | *(none — act as server)* | Hostname or IP of the server node. When omitted, the process becomes the server. When provided, the process becomes the client. |
+| `-m` | integer | `1` | Starting (minimum) message size in bytes. Must be a positive non-zero value. |
+| `-M` | integer | `4194304` (4 MiB) | Ending (maximum) message size in bytes. Must be ≥ the value of `-m`. |
+| `-f` / `--flush` | boolean | off | Flush the L3 cache before running the benchmark. Helps produce more consistent results by eliminating cache warm-up effects. |
+| `--mqstats` | boolean | off | Print PSM2 Matched Queue statistics (byte counts, message counts, eager/rendezvous splits) after the benchmark completes. |
+| `-h` / `--help` | boolean | off | Print usage information and exit. |
+
+!!! warning "Server ignores CLI arguments"
+    All benchmark parameters (`-m`, `-M`, `-f`, `--mqstats`) are set on the **client** and transmitted to the server via the TCP coordination socket. Any arguments passed to the server process are ignored (with a warning printed to stdout).
+
+### Test Tool Options (test_tool)
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `server` (positional) | string | *(none — act as server)* | Hostname or IP of the server node. When omitted, the process becomes the server. |
+| `-s` | integer | `4096` | Message size in bytes for the data-integrity test. Valid range: `1` to `1048576` (1 MiB). |
+| `-a` | boolean | off | Run **all** tests. Without this flag, only the `ping_pong` test executes. |
+| `-h` | boolean | off | Print usage information and exit. |
+
+### Compile-Time Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `SERVER_PORT` | `33087` | TCP port for out-of-band socket coordination (benchmarks). `test_tool` uses `SERVER_PORT + 1` = `33088`. |
+| `WINDOW` | `64` | Number of outstanding asynchronous messages in bandwidth tests. |
+| `ITERS_LARGE` | `50000` | Iteration count for small messages (≤ 64 KiB) in latency and bi-directional BW tests. |
+| `ITERS_MEDIUM` | `500` | Iteration count for small messages in unidirectional BW tests. |
+| `ITERS_SMALL` | `50` | Iteration count for large messages (> 64 KiB) across all benchmarks. |
+| `LARGE_MSG` | `65536` | Message size threshold at which iteration count switches from large/medium to small. |
+| `MAX_PSM2_RANKS` | `2` | Maximum number of PSM2 endpoints (one server + one client). |
+| `PING_ITERS` | `100` | Iteration count for the `test_tool` ping-pong smoke test. |
+| `TEST_MAX_MSG` | `1048576` (1 MiB) | Maximum payload size for `test_tool` data-integrity tests. |
+
+## Shannon Commands
+
+*Not applicable.* `opa-psm2-tests` executables are standalone CLI binaries and are not exposed through the Shannon agent framework.
+
+## API Endpoints
+
+*Not applicable.* `opa-psm2-tests` does not expose a REST API. Inter-node coordination uses private TCP sockets on ports `33087` (benchmarks) and `33088` (`test_tool`) solely for PSM2 endpoint address exchange and parameter synchronization.
+
+## EXAMPLES
+
+!!! warning "Prerequisites"
+    Both nodes must have the `opa-psm2` library (`libpsm2`) installed, an active OPA fabric link, and the `hfi1` kernel driver loaded. The PSM2 development headers (`libpsm2-devel`) are required to build from source. The **server** process must be started **before** the client.
+
+### Example 1 — Run the latency benchmark with default settings
+
+=== "Server (node-a)"
+
+    ```bash
+    # Start the server — no positional argument means server mode
+    ./latency
+    ```
+
+=== "Client (node-b)"
+
+    ```bash
+    # Connect to the server and run the latency sweep
+    ./latency node-a
+    ```
+
+Expected output:
+
+```text
+# PSM2 Ping Pong Latency Test
+# Message Size(B)      Latency(us)
+1                         1.23
+2                         1.24
+4                         1.25
+...
+4194304                  512.34
 ```
 
-### 2. Ping-Pong Latency Measurement
+### Example 2 — Run unidirectional bandwidth with a custom message size range
 
-The server sends a message and waits for a reply; the client receives and immediately echoes back. The server times the round-trip over many iterations, divides by two to get one-way latency, and shares the result with the client over the TCP socket. Message sizes double from 'min_msg_sz' to 'max_msg_sz'.
+=== "Server (node-a)"
 
-```mermaid
-sequenceDiagram
-    participant Server
-    participant Client
-    participant TCP as TCP Socket
+    ```bash
+    ./bw-mrate
+    ```
 
-    Note over Server,Client: For each message size (warmup then timed)
-    loop iter iterations (timed)
-        Server->>Client: post_send(sbuff, msize)
-        Client->>Client: post_irecv() + psm2_mq_wait()
-        Client->>Server: post_send(sbuff, msize)
-        Server->>Server: post_irecv() + psm2_mq_wait()
-    end
-    Server->>Server: te = ts_diff() / iter / 2
-    Server->>TCP: SEND(te)
-    TCP->>Client: RECV(te)
-    Note over Server,Client: Both print latency result
+=== "Client (node-b)"
+
+    ```bash
+    # Sweep from 1 KiB to 1 MiB only
+    ./bw-mrate node-a -m 1024 -M 1048576
+    ```
+
+Expected output:
+
+```text
+# PSM2 Uni-directional Bandwidth, Message Rate Test
+# Message Size(B)  Bandwidth(MB/s)  Message Rate(Mmps)
+1024                     2345.67                2.29
+2048                     4567.89                2.23
+...
+1048576                 11234.56                0.01
 ```
 
-### 3. Unidirectional Bandwidth / Message Rate Measurement
+### Example 3 — Run bidirectional bandwidth with L3 cache flush and MQ statistics
 
-The server sends a window of messages ('WINDOW' = 64) asynchronously using 'post_isend', waits for all to complete, then waits for an ACK from the client. The client posts a window of receives, waits for completion, and sends the ACK. After warmup and timed iterations, the server computes bandwidth and message rate, then shares results over TCP.
+=== "Server (node-a)"
 
-```mermaid
-sequenceDiagram
-    participant Server
-    participant Client
-    participant TCP as TCP Socket
+    ```bash
+    ./bi-bw-mrate
+    ```
 
-    Note over Server,Client: For each message size (warmup then timed)
-    loop iter iterations (timed on server)
-        Server->>Client: post_isend × WINDOW (64 messages)
-        Server->>Server: psm2_waitall(WINDOW sends)
-        Client->>Client: post_irecv × WINDOW
-        Client->>Client: psm2_waitall(WINDOW recvs)
-        Client->>Server: post_send(ack)
-        Server->>Server: psm2_mq_wait(ack_req)
-    end
-    Server->>Server: bw = msize / te * iter * WINDOW * 1000
-    Server->>Server: mrate = bw / msize
-    Server->>TCP: SEND(bw, mrate)
-    TCP->>Client: RECV(bw, mrate)
-    Note over Server,Client: Both print BW and MRate result
+=== "Client (node-b)"
+
+    ```bash
+    # Flush L3 cache before benchmark and show PSM2 MQ counters after
+    ./bi-bw-mrate node-a -f --mqstats
+    ```
+
+Expected output:
+
+```text
+Flushing L3 Cache... will take a few seconds
+Flushed L3 cache (29360128)
+# PSM2 Bi-directional Bandwidth, Message Rate Test
+# Message Size(B)  Bandwidth(MB/s)  Message Rate(Mmps)
+1                       1234.56                1234.56
+...
+4194304                22345.67                0.01
+PSM2 MQ STATS:
+rx_user_bytes 123456789
+rx_user_num 12345
+tx_num 12345
+tx_eager_num 11000
+tx_eager_bytes 98765432
+tx_rndv_num 1345
+tx_rndv_bytes 24691358
+...
 ```
 
-## Data Model
+### Example 4 — Run the test_tool with all tests and a 64 KiB data-integrity payload
 
-### `struct benchmark_info`
+=== "Server (node-a)"
 
-The central configuration structure, defined in 'psm2perf.h', carries all state needed to coordinate a benchmark run:
+    ```bash
+    ./test_tool/test_tool
+    ```
 
-| Field          | Type              | Description                                                    |
-|----------------|-------------------|----------------------------------------------------------------|
-| `cpu_freq`     | `double`          | CPU frequency in Hz, read from `/proc/cpuinfo`                 |
-| `hostname`     | `char[256]`       | Local hostname of this process                                 |
-| `server`       | `char[256]`       | Hostname of the server process (used for socket connection)    |
-| `is_server`    | `int`             | 1 if this process is the server, 0 if client                  |
-| `partner`      | `int`             | PSM2 rank index of the remote peer (server=1, client=0)       |
-| `min_msg_sz`   | `long`            | Starting message size in bytes (default 1)                     |
-| `max_msg_sz`   | `long`            | Ending message size in bytes (default 4 MiB)                   |
-| `run_flush`    | `int`             | If set, flush L3 cache before benchmark                        |
-| `show_mqstats` | `int`             | If set, print PSM2 MQ statistics after benchmark               |
+=== "Client (node-b)"
 
-### Global PSM2 State (in `libpsm2.c`)
+    ```bash
+    # Run all tests with a 64 KiB data-integrity message
+    ./test_tool/test_tool node-a -a -s 65536
+    ```
 
-| Variable            | Type               | Description                                      |
-|---------------------|--------------------|--------------------------------------------------|
-| `libpsm2_rank`      | `int`              | Local rank (0 for server, 1 for client)          |
-| `libpsm2_epaddrs`   | `psm2_epaddr_t *`  | Array of resolved endpoint addresses (size 2)    |
-| `libpsm2_ep`        | `psm2_ep_t`        | Local PSM2 endpoint handle                       |
-| `libpsm2_mq`        | `psm2_mq_t`        | PSM2 matched queue handle                        |
+Expected output (client side):
 
-### Global Buffers (in `psm2perf.h`)
+```text
+# PSM2 Connection Test Tool
+# node-b — CLIENT
+#
+  [PASS] ping_pong                          1234.56 us  (100 iters, 12.35 us/iter)
+  [PASS] data_integrity                      456.78 us  (65536 bytes verified)
+  [PASS] tag_match                           234.56 us  (2 tags verified)
+#
+# Summary: 3 passed, 0 failed, 0 skipped
+```
 
-| Variable       | Type               | Description                                       |
-|----------------|--------------------|----------------------------------------------------|
-| `sbuff`        | `char[4 MiB]`      | Send buffer, statically allocated at max msg size  |
-| `rbuff`        | `char[4 MiB]`      | Receive buffer, statically allocated at max msg size|
+### Example 5 — Build from source and run a quick latency check
 
-## Dependencies
+```bash
+# Clone the repository
+git clone https://github.com/cornelisnetworks/opa-psm2-tests.git
+cd opa-psm2-tests
 
-| Dependency         | Purpose                                                        | Version                |
-|--------------------|----------------------------------------------------------------|------------------------|
-| `psm2` (libpsm2)  | PSM2 API for endpoint management, matched queue messaging      | `PSM2_VERNO_MAJOR/MINOR` (runtime negotiated) |
-| `psm2_mq`         | PSM2 matched queue send/recv/test/cancel operations            | (bundled with psm2)    |
-| POSIX Sockets      | Out-of-band TCP coordination between server and client         | POSIX                  |
-| `clock_gettime`    | High-resolution monotonic timing (`CLOCK_MONOTONIC`)           | POSIX                  |
-| `getopt_long`      | Command-line argument parsing                                  | GNU C Library          |
-| `/proc/cpuinfo`    | CPU frequency detection for reporting                          | Linux procfs           |
-| `sysconf`          | L3 cache size detection for cache flushing                     | POSIX                  |
+# Build all benchmarks (requires libpsm2-devel)
+make
 
-## Configuration
+# On node-a (server):
+./latency &
 
-| Parameter / Flag       | Source           | Default         | Description                                              |
-|------------------------|------------------|-----------------|----------------------------------------------------------|
-| `server` (positional)  | CLI argument     | (none)          | Hostname of server; presence makes this process a client |
-| `-m`                   | CLI argument     | `1`             | Minimum message size in bytes                            |
-| `-M`                   | CLI argument     | `4194304` (4 MiB) | Maximum message size in bytes                         |
-| `-f` / `--flush`       | CLI argument     | off             | Flush L3 cache before running benchmark                  |
-| `--mqstats`            | CLI argument     | off             | Print PSM2 MQ statistics after benchmark                 |
-| `SERVER_PORT`          | Compile-time     | `33087`         | TCP port for out-of-band socket coordination             |
-| `WINDOW`               | Compile-time     | `64`            | Number of outstanding async messages in BW tests         |
-| `ITERS_SMALL`          | Compile-time     | `50`            | Iteration count for large messages (>64 KiB)             |
-| `ITERS_MEDIUM`         | Compile-time     | `500`           | Iteration count for uni-directional BW small messages    |
-| `ITERS_LARGE`          | Compile-time     | `50000`         | Iteration count for latency / bi-BW small messages       |
-| `LARGE_MSG`            | Compile-time     | `65536`         | Threshold at which iteration count switches to small     |
-| `MAX_PSM2_RANKS`       | Compile-time     | `2`             | Maximum number of PSM2 endpoints (server + client)       |
+# On node-b (client) — or same node for loopback:
+PSM2_DEVICES=self,shm ./latency localhost
+```
 
-All benchmark parameters set on the client are transmitted to the server via 'exchange_info()' over the TCP socket; the server ignores its own CLI arguments (with a warning).
+### Example 6 — Scripted CI fabric validation using test_tool
 
-## Error Handling
+```bash
+#!/bin/bash
+# fabric_check.sh — run on the client node
+# Usage: ./fabric_check.sh <server_hostname>
 
-The module uses a consistent **goto-bail** error handling pattern throughout:
+set -euo pipefail
+SERVER_HOST="$1"
 
-- **`libpsm2_init()`**: Each PSM2 API call is checked against `PSM2_OK`. On failure, the `PSM2_ERR` macro prints the PSM2 error string to stderr, and execution jumps to a `bail` label that frees all allocated resources, finalizes any partially-initialized PSM2 state, and returns `-1`.
-- **`init_benchmark()`**: Argument parsing errors, hostname resolution failures, and CPU frequency detection failures all jump to `bail`, which frees the `benchmark_info` struct and returns `NULL`.
-- **`open_socket()`**: Socket, bind, listen, accept, and connect failures are handled with `perror()` and a `bail` label that closes the socket and returns `-1`.
-- **`SEND` / `RECV` macros**: These macros wrap `send()`/`recv()` calls and invoke `goto bail` on failure, relying on the calling function to have a `bail` label. This is a macro-driven control flow pattern that couples the macros to the structure of the calling function.
-- **`libpsm2_shutdown()`**: Logs but does not propagate errors from `psm2_mq_finalize()`.
-- **Benchmark run functions** (`run_latency`, `run_bw_mrate`, `run_bi_bw_mrate`): Each has a `bail` label returning `-1`, though the primary error paths are in the `SEND`/`RECV` macros.
-- **`main()` functions**: Check return values from each initialization step and jump to `bail` for cleanup (closing socket, freeing info struct).
+cd /opt/opa-psm2-tests/test_tool
 
-There is no exception hierarchy; all errors are communicated via integer return codes (`0` success, `-1` failure) and `perror()`/`fprintf(stderr)` messages.
+./test_tool "$SERVER_HOST" -a -s 8192
+rc=$?
 
-## Known Limitations / Technical Debt
+if [ $rc -ne 0 ]; then
+    echo "FABRIC CHECK FAILED — see test output above" >&2
+    exit 1
+fi
 
-1. **Hardcoded TCP port**: `SERVER_PORT` is defined as `33087` at compile time in 'psm2perf.h'. There is no runtime override, which can cause conflicts in multi-tenant environments.
+echo "All fabric connectivity tests passed."
+```
 
-2. **`SEND`/`RECV` macro control flow coupling**: The `SEND` and `RECV` macros in 'psm2perf.h' contain `goto bail` statements, requiring every calling function to define a `bail` label. This is fragile and non-obvious to maintainers.
+### Example 7 — Loopback latency test on a single node
 
-3. **Partial `send()`/`recv()` not handled**: The `SEND` and `RECV` macros do not handle partial reads/writes. TCP `send()` and `recv()` may return fewer bytes than requested; the macros only check for `-1` (error), not short transfers.
+```bash
+# Force PSM2 to use shared-memory transport for single-node testing
+export PSM2_DEVICES=self,shm
 
-4. **Server socket file descriptor leak**: In 'open_socket()', when `is_server` is true, the original listening socket is replaced by the accepted socket via reassignment (`sock = accept(...)`). The original listening socket file descriptor is never closed.
+# Start server in background
+./latency &
+sleep 1
 
-5. **Global mutable buffers**: `sbuff`, `rbuff`, and `server_name` are declared as non-static globals in the header file 'psm2perf.h'. Since each benchmark is a separate executable this works, but it would cause linker errors if multiple translation units including this header were linked together.
+# Run client against localhost
+./latency localhost
 
-6. **`MAX_PSM2_RANKS` fixed at 2**: The PSM2 layer is hardcoded to support exactly two ranks (one server, one client). Multi-node or multi-process benchmarking is not supported without code changes.
+# Wait for background server to finish
+wait
+```
 
-7. **`cpu_freq` read but unused in timing**: The CPU frequency is read from `/proc/cpuinfo` and stored in `benchmark_info`, but timing is done via `clock_gettime(CLOCK_MONOTONIC)`. The `get_cycles()` inline function (using `rdtsc`) is defined in 'libpsm2.h' but never called. The `cpu_freq` field appears to be vestigial.
+### Example 8 — Compare unidirectional vs. bidirectional bandwidth
 
-8. **Unused `rank` parameter in inline wrappers**: The `rank` parameter in `post_irecv()` is accepted but not used — `psm2_mq_irecv()` does not take a source address. This is misleading to callers.
+```bash
+# On the server node (run both in sequence):
+./bw-mrate &
+BW_PID=$!
 
-9. **`libpsm2_mpi_rank` declared but undefined**: 'libpsm2.h' declares `extern int libpsm2_mpi_rank`, but 'libpsm2.c' defines `int libpsm2_rank` instead. The extern is never satisfied, though it is also never referenced, so no linker error occurs in practice.
+# On the client node:
+./bw-mrate node-a -m 4096 -M 4194304 | tee uni-bw.txt
+wait $BW_PID
 
-10. **`.hypatia-test` file**: This is a trivial test marker file with no functional content. It can be safely removed.
+# Now bidirectional:
+./bi-bw-mrate &
+BIBW_PID=$!
+
+# On the client node:
+./bi-bw-mrate node-a -m 4096 -M 4194304 | tee bi-bw.txt
+wait $BIBW_PID
+
+# Compare results
+paste uni-bw.txt bi-bw.txt
+```
+
+## ENVIRONMENT
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PSM2_DEVICES` | No | `self,shm,hfi` | Comma-separated list of PSM2 device types to use. Set to `self,shm` for loopback testing without a fabric peer. |
+| `HFI_UNIT` | No | `0` | Selects the HFI adapter unit number when multiple adapters are present. |
+| `PSM2_TRACEMASK` | No | `0x1` | Bitmask controlling PSM2 internal debug tracing. Increase for verbose diagnostics. |
+| `PSM2_MQ_RNDV_HFI_WINDOW` | No | `131072` | Rendezvous window size in bytes. May affect large-message bandwidth performance. |
+| `PSM2_MQ_RECVREQS_MAX` | No | `1048576` | Maximum number of pre-posted receive requests in the PSM2 matched queue. |
+| `PSM2_MTU` | No | *(driver default)* | Override the maximum transfer unit size used by PSM2. |
+
+!!! tip "Loopback testing"
+    To test on a single node without a fabric peer, set `PSM2_DEVICES=self,shm` and use `localhost` as the server hostname. This exercises the shared-memory transport path rather than the HFI hardware path.
+
+## FILES
+
+| Path | Description |
+|---|---|
+| `latency.c` | Ping-pong latency benchmark executable source. |
+| `bw-mrate.c` | Unidirectional bandwidth and message rate benchmark executable source. |
+| `bi-bw-mrate.c` | Bidirectional bandwidth and message rate benchmark executable source. |
+| `libpsm2.c` | Shared PSM2 lifecycle management: initialization, endpoint open/connect, shutdown, MQ statistics. |
+| `libpsm2.h` | PSM2 wrapper API header: inline helpers for `post_send`, `post_isend`, `post_irecv`, `psm2_waitall`, `cancel`, `test`. |
+| `psm2perf.c` | Shared benchmark infrastructure: `init_benchmark()`, `open_socket()`, `exchange_info()`, `get_cpu_rate()`. |
+| `psm2perf.h` | Constants, macros (`SEND`, `RECV`, `TIMER`), data structures (`benchmark_info`), global buffers (`sbuff`, `rbuff`), and inline utilities (`flush_l3cache`, `ts_diff`). |
+| `test_tool/test_tool.c` | Connection test tool: ping-pong, data-integrity, and tag-match test implementations plus CLI entry point. |
+| `test_tool/test_tool.h` | Test tool header: constants (`TAG_*`, `TEST_MAX_MSG`, `PING_ITERS`), `test_result` struct, inline `fill_pattern`/`verify_pattern` helpers. |
+| `test_tool/Makefile` | Build rules for the test tool. Links against `libpsm2.o`, `psm2perf.o`, and the system `libpsm2` library. |
+| `Makefile` | Top-level build rules for all benchmark executables. |
+| `/proc/cpuinfo` | Read at startup to detect CPU frequency (stored in `benchmark_info.cpu_freq`). |
+
+## EXIT STATUS
+
+### Performance Benchmarks (latency, bw-mrate, bi-bw-mrate)
+
+| Code | Meaning |
+|---|---|
+| `0` | Benchmark completed successfully. |
+| `-1` | Fatal error during initialization (argument parsing failure, socket open failure, PSM2 initialization failure) or during benchmark execution (TCP send/recv failure). |
+
+### Test Tool (test_tool)
+
+| Code | Meaning |
+|---|---|
+| `0` | All executed tests passed (`num_fail == 0`). |
+| `1` | One or more tests failed, **or** a fatal initialization error occurred (socket open failure, PSM2 init failure, invalid arguments). |
+
+!!! warning "Partial execution"
+    If a benchmark or test tool exits with a non-zero code due to an initialization error (e.g., socket failure, PSM2 endpoint open failure), no results are printed. Check `stderr` for diagnostic messages from `perror()` or the `PSM2_ERR` macro in this case.
+
+## SEE ALSO
+
+- [`opa-psm2`](https://github.com/cornelisnetworks/opa-psm2) — The PSM2 user-space library that these benchmarks and tests exercise.
+- [`test_tool`](test-tool.md) — Detailed user guide for the PSM2 connection test tool.
+- `psm2_mq_isend(3)`, `psm2_mq_irecv(3)`, `psm2_mq_wait(3)`, `psm2_mq_send(3)` — PSM2 Matched Queue API man pages.
+- `psm2_ep_open(3)`, `psm2_ep_connect(3)`, `psm2_ep_close(3)` — PSM2 endpoint management API man pages.
+- `clock_gettime(2)` — POSIX high-resolution timer used for all benchmark measurements.
+
+---
+
+*Copyright © 2026 Cornelis Networks. Dual licensed under BSD and GPLv2.*
