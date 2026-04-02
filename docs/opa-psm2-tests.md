@@ -350,8 +350,3 @@ No breaking changes have been introduced in the current release. The following i
 - [`test_tool`](test-tool.md) — Detailed design reference for the PSM2 connection test tool.
 - `psm2_mq_isend(3)`, `psm2_mq_irecv(3)`, `psm2_mq_wait(3)`, `psm2_mq_send(3)` — PSM2 Matched Queue API man pages.
 - `psm2_ep_open(3)`, `psm2_ep_connect(3)`, `psm2_ep_close(3)` — PSM2 endpoint management API man pages.
-- `clock_gettime(2)` — POSIX high-resolution timer used for all benchmark measurements.
-
----
-
-*Copyright © 2026 Cornelis Networks. Dual licensed under BSD and GPLv2.*
