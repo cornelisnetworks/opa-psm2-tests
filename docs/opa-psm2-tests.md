@@ -59,6 +59,9 @@ The `test_tool` utility complements the performance benchmarks by providing func
 | `-a` | boolean | off | Run **all** tests. Without this flag, only the `ping_pong` test executes. |
 | `-h` | boolean | off | Print usage information and exit. |
 
+!!! tip
+    The `-s` option only affects the `data_integrity` test. It has no effect unless `-a` is also specified.
+
 ### Compile-Time Constants
 
 | Constant | Value | Description |
@@ -86,7 +89,21 @@ The `test_tool` utility complements the performance benchmarks by providing func
 !!! warning "Prerequisites"
     Both nodes must have the `opa-psm2` library (`libpsm2`) installed, an active OPA fabric link, and the `hfi1` kernel driver loaded. The PSM2 development headers (`libpsm2-devel`) are required to build from source. The **server** process must be started **before** the client.
 
-### Example 1 — Run the latency benchmark with default settings
+### Example 1 — Build from source and run a quick latency check
+
+```bash
+# Clone the repository
+git clone https://github.com/cornelisnetworks/opa-psm2-tests.git
+cd opa-psm2-tests
+
+# Build all benchmarks (requires libpsm2-devel)
+make
+
+# Build the test tool
+cd test_tool && make && cd ..
+```
+
+### Example 2 — Run the latency benchmark with default settings
 
 === "Server (node-a)"
 
@@ -98,7 +115,7 @@ The `test_tool` utility complements the performance benchmarks by providing func
 === "Client (node-b)"
 
     ```bash
-    # Connect to the server and run the latency sweep
+    # Connect to the server and run the latency sweep (1 B to 4 MiB)
     ./latency node-a
     ```
 
@@ -114,7 +131,7 @@ Expected output:
 4194304                  512.34
 ```
 
-### Example 2 — Run unidirectional bandwidth with a custom message size range
+### Example 3 — Run unidirectional bandwidth with a custom message size range
 
 === "Server (node-a)"
 
@@ -140,7 +157,7 @@ Expected output:
 1048576                 11234.56                0.01
 ```
 
-### Example 3 — Run bidirectional bandwidth with L3 cache flush and MQ statistics
+### Example 4 — Run bidirectional bandwidth with L3 cache flush and MQ statistics
 
 === "Server (node-a)"
 
@@ -176,7 +193,7 @@ tx_rndv_bytes 24691358
 ...
 ```
 
-### Example 4 — Run the test_tool with all tests and a 64 KiB data-integrity payload
+### Example 5 — Run the test_tool with all tests and a 64 KiB data-integrity payload
 
 === "Server (node-a)"
 
@@ -204,24 +221,24 @@ Expected output (client side):
 # Summary: 3 passed, 0 failed, 0 skipped
 ```
 
-### Example 5 — Build from source and run a quick latency check
+### Example 6 — Loopback latency test on a single node
 
 ```bash
-# Clone the repository
-git clone https://github.com/cornelisnetworks/opa-psm2-tests.git
-cd opa-psm2-tests
+# Force PSM2 to use shared-memory transport for single-node testing
+export PSM2_DEVICES=self,shm
 
-# Build all benchmarks (requires libpsm2-devel)
-make
-
-# On node-a (server):
+# Start server in background
 ./latency &
+sleep 1
 
-# On node-b (client) — or same node for loopback:
-PSM2_DEVICES=self,shm ./latency localhost
+# Run client against localhost
+./latency localhost
+
+# Wait for background server to finish
+wait
 ```
 
-### Example 6 — Scripted CI fabric validation using test_tool
+### Example 7 — Scripted CI fabric validation using test_tool
 
 ```bash
 #!/bin/bash
@@ -244,43 +261,23 @@ fi
 echo "All fabric connectivity tests passed."
 ```
 
-### Example 7 — Loopback latency test on a single node
-
-```bash
-# Force PSM2 to use shared-memory transport for single-node testing
-export PSM2_DEVICES=self,shm
-
-# Start server in background
-./latency &
-sleep 1
-
-# Run client against localhost
-./latency localhost
-
-# Wait for background server to finish
-wait
-```
-
 ### Example 8 — Compare unidirectional vs. bidirectional bandwidth
 
 ```bash
-# On the server node (run both in sequence):
-./bw-mrate &
-BW_PID=$!
+# === On the server node (node-a) ===
+# Run unidirectional server first
+./bw-mrate
+# After client finishes, run bidirectional server
+./bi-bw-mrate
 
-# On the client node:
+# === On the client node (node-b) ===
+# Capture unidirectional results
 ./bw-mrate node-a -m 4096 -M 4194304 | tee uni-bw.txt
-wait $BW_PID
 
-# Now bidirectional:
-./bi-bw-mrate &
-BIBW_PID=$!
-
-# On the client node:
+# Capture bidirectional results
 ./bi-bw-mrate node-a -m 4096 -M 4194304 | tee bi-bw.txt
-wait $BIBW_PID
 
-# Compare results
+# Compare results side by side
 paste uni-bw.txt bi-bw.txt
 ```
 
@@ -302,6 +299,7 @@ paste uni-bw.txt bi-bw.txt
 
 | Path | Description |
 |---|---|
+| `Makefile` | Top-level build rules for all benchmark executables (`latency`, `bw-mrate`, `bi-bw-mrate`). |
 | `latency.c` | Ping-pong latency benchmark executable source. |
 | `bw-mrate.c` | Unidirectional bandwidth and message rate benchmark executable source. |
 | `bi-bw-mrate.c` | Bidirectional bandwidth and message rate benchmark executable source. |
@@ -312,7 +310,6 @@ paste uni-bw.txt bi-bw.txt
 | `test_tool/test_tool.c` | Connection test tool: ping-pong, data-integrity, and tag-match test implementations plus CLI entry point. |
 | `test_tool/test_tool.h` | Test tool header: constants (`TAG_*`, `TEST_MAX_MSG`, `PING_ITERS`), `test_result` struct, inline `fill_pattern`/`verify_pattern` helpers. |
 | `test_tool/Makefile` | Build rules for the test tool. Links against `libpsm2.o`, `psm2perf.o`, and the system `libpsm2` library. |
-| `Makefile` | Top-level build rules for all benchmark executables. |
 | `/proc/cpuinfo` | Read at startup to detect CPU frequency (stored in `benchmark_info.cpu_freq`). |
 
 ## EXIT STATUS
@@ -337,7 +334,7 @@ paste uni-bw.txt bi-bw.txt
 ## SEE ALSO
 
 - [`opa-psm2`](https://github.com/cornelisnetworks/opa-psm2) — The PSM2 user-space library that these benchmarks and tests exercise.
-- [`test_tool`](test-tool.md) — Detailed user guide for the PSM2 connection test tool.
+- [`test_tool`](test-tool.md) — Detailed design reference for the PSM2 connection test tool.
 - `psm2_mq_isend(3)`, `psm2_mq_irecv(3)`, `psm2_mq_wait(3)`, `psm2_mq_send(3)` — PSM2 Matched Queue API man pages.
 - `psm2_ep_open(3)`, `psm2_ep_connect(3)`, `psm2_ep_close(3)` — PSM2 endpoint management API man pages.
 - `clock_gettime(2)` — POSIX high-resolution timer used for all benchmark measurements.

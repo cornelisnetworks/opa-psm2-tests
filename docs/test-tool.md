@@ -2,15 +2,15 @@
 
 ```markdown
 ---
-title: "Test Tool — Design Reference"
-description: "PSM2 connection test tool for verifying connectivity, data integrity, and tag-matching over the OPA fabric"
+title: "test_tool — PSM2 Connection Test Tool"
+description: "User guide and design reference for the PSM2 connection test tool in opa-psm2-tests"
 ---
 
 # test_tool
 
 ## NAME
 
-**test_tool** — PSM2 connection test tool that verifies connectivity, data integrity, and tag-match isolation over the Omni-Path Architecture (OPA) fabric.
+**test_tool** — PSM2 connection test tool that verifies connectivity, data integrity, and tag-matching isolation over the OPA fabric.
 
 ## SYNOPSIS
 
@@ -20,210 +20,191 @@ test_tool [server] [-s size] [-a] [-h]
 
 ## DESCRIPTION
 
-`test_tool` is a client/server diagnostic utility from the `opa-psm2-tests` repository that exercises the PSM2 Matched-Queue (MQ) messaging API over an OPA fabric link. It is designed to validate that two nodes can exchange messages correctly, that payload data survives the transfer without corruption, and that the PSM2 tag-matching logic correctly demultiplexes concurrent message streams.
+`test_tool` is a client/server diagnostic utility that exercises the PSM2 Matched Queue (MQ) messaging API over an Omni-Path Architecture (OPA) fabric. It is designed to validate that a pair of nodes can successfully exchange messages, that payload data arrives without corruption, and that the PSM2 tag-matching logic correctly demultiplexes concurrent message streams onto distinct receive buffers.
 
-The tool operates in a two-node model: one node runs as the **server** (listener) and the other as the **client** (initiator). The server is started without a positional argument; the client is started with the server's hostname. Both sides use the shared `libpsm2` and `psm2perf` infrastructure from the parent repository to initialize PSM2 endpoints, exchange addressing information over a TCP socket, and then perform the selected tests entirely over the OPA fabric.
+The tool is built on the same `libpsm2` and `psm2perf` shared infrastructure used by the latency and bandwidth benchmarks in the `opa-psm2-tests` repository. It reuses the `init_benchmark()`, `open_socket()`, `exchange_info()`, and `libpsm2_init()` helpers for endpoint setup and out-of-band coordination, so the operational model — one side runs as a server, the other as a client that names the server — is identical to the existing performance tools.
 
-Three built-in tests are provided. The **ping_pong** test measures round-trip latency over 100 iterations of 64-byte messages. The **data_integrity** test fills a buffer with a deterministic byte pattern, sends it to the peer, and verifies the received content byte-by-byte on both sides. The **tag_match** test sends two messages with distinct PSM2 tag values concurrently and confirms that each message is delivered to the correct receive buffer. By default only the ping-pong test runs; the `-a` flag enables the full suite.
+Three tests are provided. The **ping_pong** test is always executed and serves as a basic connectivity smoke test. The **data_integrity** and **tag_match** tests are enabled with the `-a` flag and perform deeper verification. All results are printed in a structured `[PASS]`/`[FAIL]`/`[SKIP]` format with per-test timing and a final summary line, making the output suitable for both interactive use and automated CI pipelines.
 
 ## SUBCOMMANDS
 
-`test_tool` does not use named subcommands. Test selection is controlled through the `-a` option flag. The individual tests executed are:
+`test_tool` does not use explicit subcommands. Test selection is controlled through the `-a` option flag. The individual tests executed are:
 
-| Test Name        | Description                                                                                      |
-|------------------|--------------------------------------------------------------------------------------------------|
-| `ping_pong`      | Round-trip message exchange using 64-byte messages over 100 iterations. Always runs.             |
-| `data_integrity` | Send/receive with deterministic fill-pattern verification. Runs when `-a` is specified.          |
-| `tag_match`      | Concurrent sends on two different tags with isolation verification. Runs when `-a` is specified. |
+| Test | Description |
+|------|-------------|
+| `ping_pong` | Round-trip message exchange using 64-byte messages over 100 iterations. Measures per-iteration latency. Always runs. |
+| `data_integrity` | Sends a deterministic fill-pattern payload from server to client, client verifies byte-by-byte, echoes back, and server re-verifies. Runs with `-a`. |
+| `tag_match` | Sends two concurrent messages with distinct PSM2 tags (`TAG_MULTI_A`, `TAG_MULTI_B`), verifies each lands in the correct receive buffer via tag-selective matching. Runs with `-a`. |
 
 ## OPTIONS
 
 ### Global Options
 
-| Flag        | Type     | Default | Description                                                                                  |
-|-------------|----------|---------|----------------------------------------------------------------------------------------------|
-| `server`    | positional (string) | *(none — act as server)* | Hostname of the server node. Omit this argument to start in server mode. |
-| `-s SIZE`   | integer  | `4096`  | Message size in bytes for the `data_integrity` test. Valid range: `1` to `1048576` (1 MiB).  |
-| `-a`        | flag     | off     | Run all tests. Without this flag only the `ping_pong` test executes.                         |
-| `-h`        | flag     | off     | Print usage information and exit.                                                            |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `server` | positional string | *(none — act as server)* | Hostname or IP address of the server node. Omit this argument to run as the server side. |
+| `-s SIZE` | integer | `4096` | Message size in bytes for the `data_integrity` test. Valid range: `1` to `1048576` (1 MiB). |
+| `-a` | boolean flag | off | Run all tests. Without this flag only the `ping_pong` test executes. |
+| `-h` | boolean flag | off | Print usage information and exit. |
 
 !!! tip
-    The `-s` option only affects the `data_integrity` test. It has no effect unless `-a` is also specified.
+    The `-s` flag only affects the `data_integrity` test. The `ping_pong` and `tag_match` tests always use 64-byte messages.
 
-### Inherited Options (from `init_benchmark`)
+!!! warning
+    The positional `server` argument is parsed by `init_benchmark()` before `getopt` processes the option flags. Place the hostname **before** any dash-prefixed options to avoid ambiguity.
 
-Options parsed by the shared `psm2perf` / `libpsm2` initialization layer (e.g., HFI unit selection, MQ statistics display) are also accepted. Refer to the `psm2perf` documentation for the full list.
+### Inherited Options
+
+Options inherited from the shared `psm2perf` / `init_benchmark()` infrastructure (e.g., `--show-mqstats`) are also accepted. When `info->show_mqstats` is set, PSM2 internal MQ statistics are printed after the test summary via `print_psm2_stats()`.
 
 ## Shannon Commands
 
-`test_tool` is a standalone CLI binary and is not exposed through the Shannon agent framework. This section is not applicable.
-
-| Command | Method | Description |
-|---------|--------|-------------|
-| *(n/a)* | —      | `test_tool` does not register Shannon commands. |
+*Not applicable.* `test_tool` is a standalone CLI binary and is not exposed through the Shannon agent framework.
 
 ## API Endpoints
 
-`test_tool` does not expose a REST API. It communicates between server and client over a raw TCP socket (port `SERVER_PORT + 1`) for PSM2 endpoint information exchange, then uses PSM2 MQ operations for all test traffic.
-
-| Method | Path  | Description |
-|--------|-------|-------------|
-| *(n/a)* | —    | `test_tool` does not expose HTTP endpoints. |
+*Not applicable.* `test_tool` does not expose a REST API. Inter-node coordination uses a raw TCP socket on port `SERVER_PORT + 1` for out-of-band endpoint information exchange, followed by PSM2 MQ operations for the actual test traffic.
 
 ## EXAMPLES
 
 ### Example 1 — Start the server side
 
-On the server node, launch `test_tool` with no positional argument. It will listen for an incoming client connection:
+Run `test_tool` with no positional argument to act as the server. The process will listen for an incoming client connection:
 
 ```bash
-# On server node (e.g., opa-node01)
+# On node "opa-server-01":
 cd test_tool
 ./test_tool
 ```
 
 ### Example 2 — Run the default ping-pong test from the client
 
-On the client node, specify the server hostname. Only the `ping_pong` test runs by default:
+Connect to the server and execute only the `ping_pong` connectivity smoke test (the default):
 
 ```bash
-# On client node (e.g., opa-node02)
-cd test_tool
-./test_tool opa-node01
+# On node "opa-client-01":
+./test_tool opa-server-01
 ```
 
-Expected output on both sides:
+Expected output:
 
 ```text
 # PSM2 Connection Test Tool
-# opa-node02 — CLIENT
+# opa-client-01 — CLIENT
 #
-  [PASS] ping_pong                          234.50 us  (100 iters, 2.35 us/iter)
+  [PASS] ping_pong                          1234.56 us  (100 iters, 12.35 us/iter)
 #
 # Summary: 1 passed, 0 failed, 0 skipped
 ```
 
-### Example 3 — Run the full test suite
+### Example 3 — Run all tests with the default 4 KiB data-integrity payload
 
-Use the `-a` flag to execute all three tests (ping-pong, data integrity, and tag match):
+Enable the full test suite with `-a`:
 
 ```bash
-# Server
+# Server side:
 ./test_tool
 
-# Client
-./test_tool opa-node01 -a
+# Client side:
+./test_tool opa-server-01 -a
 ```
 
-### Example 4 — Run with a custom data-integrity message size
+### Example 4 — Run all tests with a 64 KiB data-integrity payload
 
-Specify a 64 KiB payload for the data-integrity test:
+Use `-s` to increase the data-integrity message size to 65536 bytes:
 
 ```bash
-# Server
+# Server side:
 ./test_tool
 
-# Client
-./test_tool opa-node01 -s 65536 -a
+# Client side:
+./test_tool opa-server-01 -s 65536 -a
 ```
 
-### Example 5 — Run with the maximum 1 MiB payload
+### Example 5 — Run all tests with the maximum 1 MiB payload
 
-Stress the data path with the largest supported message size:
+Stress the data path with the largest supported message:
 
 ```bash
-# Server
+# Server side:
 ./test_tool
 
-# Client
-./test_tool opa-node01 -s 1048576 -a
+# Client side:
+./test_tool opa-server-01 -s 1048576 -a
 ```
 
-### Example 6 — Display help text
+### Example 6 — Build from source
+
+Compile `test_tool` and its shared dependencies from the repository root:
 
 ```bash
-./test_tool -h
+cd opa-psm2-tests/test_tool
+make clean
+make
 ```
 
-Output:
-
-```text
-usage: ./test_tool [server] [-s size] [-a] [-h]
-
-PSM2 connection test tool — verifies connectivity and data
-integrity over the OPA fabric using the PSM2 messaging API.
-
-positional:
-  server        hostname of the server node (omit to be server)
-
-options:
-  -s SIZE       message size for data-integrity test (default 4096)
-  -a            run all tests (default: ping-pong only)
-  -h            show this help
-```
-
-### Example 7 — Scripted pass/fail gate in CI
+### Example 7 — Scripted pass/fail check in CI
 
 Use the exit code to gate a CI pipeline:
 
 ```bash
-# On the server (backgrounded)
+#!/bin/bash
+set -e
+
+# Start server in background on the local node
 ./test_tool &
 SERVER_PID=$!
+sleep 2
 
-# On the client (same node for loopback, or remote via ssh)
-ssh opa-node02 "cd /path/to/test_tool && ./test_tool opa-node01 -a"
+# Run client against localhost with all tests
+./test_tool localhost -s 8192 -a
 RC=$?
 
-kill $SERVER_PID 2>/dev/null
-if [ $RC -ne 0 ]; then
-    echo "FATAL: PSM2 test suite failed"
-    exit 1
-fi
-echo "All PSM2 tests passed"
+wait $SERVER_PID
+exit $RC
 ```
 
 ## ENVIRONMENT
 
-| Variable              | Required | Default          | Description                                                                                          |
-|-----------------------|----------|------------------|------------------------------------------------------------------------------------------------------|
-| `PSM2_DEVICES`        | No       | *(auto-detect)*  | Comma-separated list of PSM2 device types to use (e.g., `self,shm,hfi`).                            |
-| `HFI_UNIT`            | No       | `0`              | HFI unit number to open. Relevant on multi-HFI systems.                                             |
-| `PSM2_TRACEMASK`      | No       | `0x1`            | Bitmask controlling PSM2 internal tracing verbosity.                                                 |
-| `PSM2_MQ_RNDV_HFI_WINDOW` | No  | *(library default)* | Rendezvous window size for large messages. May affect `data_integrity` test with large `-s` values. |
-| `PSM2_MTU`            | No       | *(fabric default)* | Override the path MTU used by PSM2.                                                                 |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PSM2_DEVICES` | No | *(auto)* | Colon-separated list of PSM2 device names to use. Inherited by `libpsm2_init()`. |
+| `PSM2_TRACEMASK` | No | `0` | Bitmask controlling PSM2 internal debug tracing. Useful for diagnosing connection failures. |
+| `HFI_UNIT` | No | `0` | Selects the HFI unit number when multiple OPA adapters are present. |
+| `PSM2_MQ_RNDV_HFI_WINDOW` | No | *(library default)* | Controls the rendezvous window size for large messages. May affect `data_integrity` test performance at 1 MiB. |
+| `PSM2_MTU` | No | *(fabric default)* | Override the maximum transfer unit. Must not exceed the fabric-configured MTU. |
 
-!!! warning
-    Setting `PSM2_DEVICES` incorrectly (e.g., omitting `hfi`) will prevent the tool from communicating over the OPA fabric and cause connection failures.
+!!! tip
+    Set `PSM2_TRACEMASK=0xffff` to enable verbose PSM2 debug output when troubleshooting connection establishment failures.
 
 ## FILES
 
-| Path                          | Description                                                                                     |
-|-------------------------------|-------------------------------------------------------------------------------------------------|
-| `test_tool/test_tool.c`       | Main source file containing test implementations and CLI entry point.                           |
-| `test_tool/test_tool.h`       | Header file defining test constants, tag values, result structures, and inline helper functions. |
-| `test_tool/Makefile`          | Build rules for compiling `test_tool` and linking against `libpsm2` and `psm2perf`.             |
-| `test_tool/README`            | Brief plain-text usage notes.                                                                   |
-| `libpsm2.h` / `libpsm2.c`    | Shared PSM2 initialization, endpoint management, and MQ operation wrappers (parent directory).   |
-| `psm2perf.h` / `psm2perf.c`  | Shared benchmark infrastructure: socket helpers, info exchange, timing macros (parent directory). |
+| Path | Description |
+|------|-------------|
+| `test_tool/test_tool.c` | Main source file containing test implementations (`run_ping_pong`, `run_data_integrity`, `run_tag_match`) and the CLI entry point. |
+| `test_tool/test_tool.h` | Header defining test constants (`TEST_MAX_MSG`, `PING_ITERS`, `FILL_SEED`), tag values, the `test_result` struct, and inline `fill_pattern()` / `verify_pattern()` helpers. |
+| `test_tool/Makefile` | Build rules for `test_tool`. Links against `libpsm2.o`, `psm2perf.o`, and `-lpsm2`. |
+| `test_tool/README` | Plain-text quick-start reference. |
+| `libpsm2.h` / `libpsm2.o` | Shared PSM2 wrapper library providing `libpsm2_init()`, `libpsm2_shutdown()`, `post_send()`, `post_irecv()`, and `print_psm2_stats()`. |
+| `psm2perf.h` / `psm2perf.o` | Shared benchmark infrastructure providing `init_benchmark()`, `open_socket()`, `exchange_info()`, `TIMER()`, and `ts_diff()`. |
 
 ## EXIT STATUS
 
-| Code | Meaning                                                                                          |
-|------|--------------------------------------------------------------------------------------------------|
-| `0`  | All executed tests passed (`num_fail == 0`).                                                     |
-| `1`  | One or more tests failed, or a fatal initialization error occurred (socket open, PSM2 init, info exchange, or invalid command-line argument). |
+| Code | Meaning |
+|------|---------|
+| `0` | All executed tests passed (`num_fail == 0`). |
+| `1` | One or more tests failed, **or** a fatal initialization error occurred (benchmark init failure, socket open failure, info exchange failure, or PSM2 init failure). |
 
-!!! tip
-    The summary line printed at the end of execution (`# Summary: N passed, N failed, N skipped`) provides a human-readable breakdown. The exit code is the machine-readable equivalent: `0` for clean, `1` for any failure.
+!!! warning
+    An exit code of `1` is used for both test failures and infrastructure errors. Inspect the standard output for the `# Summary:` line to distinguish between the two cases. If no summary line is printed, the failure occurred during setup before any tests ran.
 
 ## SEE ALSO
 
-- **Repository:** [cornelisnetworks/opa-psm2-tests](https://github.com/cornelisnetworks/opa-psm2-tests)
-- **libpsm2 / psm2perf** — Shared PSM2 wrapper library and benchmark infrastructure used by `test_tool` and the latency/bandwidth benchmarks in the same repository.
-- **PSM2 Programmer's Guide** — Intel/Cornelis PSM2 API reference for `psm2_mq_isend`, `psm2_mq_irecv`, `psm2_mq_wait`, and tag-matching semantics.
-- **opa-psm2** — The [Cornelis PSM2 userspace library](https://github.com/cornelisnetworks/opa-psm2) that `test_tool` links against (`-lpsm2`).
-- **opainfo(1)** — OPA fabric diagnostic utility for verifying link state before running `test_tool`.
+- **opa-psm2-tests repository** — [github.com/cornelisnetworks/opa-psm2-tests](https://github.com/cornelisnetworks/opa-psm2-tests)
+- **libpsm2** (`libpsm2.h`) — Shared PSM2 endpoint management and MQ operation wrappers used by all tools in the repository.
+- **psm2perf** (`psm2perf.h`) — Shared benchmark scaffolding: socket coordination, timing macros, and `benchmark_info` lifecycle.
+- **PSM2 Programmer's Guide** — Cornelis Networks documentation for the PSM2 Matched Queue API (`psm2_mq_isend`, `psm2_mq_irecv`, `psm2_mq_wait`).
+- **opa-psm2** — [github.com/cornelisnetworks/opa-psm2](https://github.com/cornelisnetworks/opa-psm2) — The PSM2 userspace library that `test_tool` links against (`-lpsm2`).
 
 ---
 
