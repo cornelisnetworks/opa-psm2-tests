@@ -1,0 +1,268 @@
+# GitHub Action: Hemingway Documentation Generation
+#
+# Copy this workflow to any repo that should get auto-generated docs.
+# Requires: HEMINGWAY_API_URL secret (optional — defaults to https://hemingway.cn-agents.com)
+#
+# Flow:
+#   PR opened/updated → Hemingway generates docs → commits to PR branch →
+#   sets hemingway/documentation status to pending → posts full content in PR comment.
+#   PR review approved → sets status to success → merge unblocked.
+
+name: Generate Documentation
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  pull_request_review:
+    types: [submitted]
+
+concurrency:
+  group: doc-gen-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  generate-docs:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.actor != 'github-actions[bot]'
+      && github.actor != 'scm-bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Submit doc generation job
+        id: submit
+        run: |
+          HEMINGWAY_URL="${{ secrets.HEMINGWAY_API_URL }}"
+          if [ -z "$HEMINGWAY_URL" ]; then
+            HEMINGWAY_URL="https://hemingway.cn-agents.com"
+          fi
+          echo "hemingway_url=$HEMINGWAY_URL" >> "$GITHUB_OUTPUT"
+
+          RESPONSE=$(curl -sf -X POST \
+            "${HEMINGWAY_URL}/v1/docs/pr-review" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "pr_number": ${{ github.event.pull_request.number }},
+              "target_dir": "docs",
+              "dry_run": false
+            }' \
+            --max-time 30 \
+            --retry 1 \
+            2>/dev/null) || {
+            echo "::warning::Hemingway API unreachable"
+            echo "api_ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id // empty')
+          OK=$(echo "$RESPONSE" | jq -r '.ok // false')
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+          echo "api_ok=$OK" >> "$GITHUB_OUTPUT"
+
+      - name: Poll for completion
+        if: steps.submit.outputs.api_ok == 'true' && steps.submit.outputs.job_id != ''
+        id: poll
+        run: |
+          HEMINGWAY_URL="${{ steps.submit.outputs.hemingway_url }}"
+          JOB_ID="${{ steps.submit.outputs.job_id }}"
+          POLL_URL="${HEMINGWAY_URL}/v1/docs/pr-review/${JOB_ID}"
+
+          for i in $(seq 1 60); do
+            sleep 15
+            RESULT=$(curl -sf --max-time 10 "$POLL_URL" 2>/dev/null) || continue
+
+            STATUS=$(echo "$RESULT" | jq -r '.status // "unknown"')
+            echo "Poll $i: status=$STATUS"
+
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+              echo "$RESULT" > /tmp/hemingway_response.json
+
+              OK=$(echo "$RESULT" | jq -r '.ok // false')
+              DOC_COUNT=$(echo "$RESULT" | jq -r '.data.generated_docs | length // 0')
+              COMMITTED=$(echo "$RESULT" | jq -r '.data.files_committed // false')
+              COMMIT_SHA=$(echo "$RESULT" | jq -r '.data.commit_sha // empty')
+              ERROR_MSG=$(echo "$RESULT" | jq -r '.error // empty')
+
+              echo "api_ok=$OK" >> "$GITHUB_OUTPUT"
+              echo "doc_count=$DOC_COUNT" >> "$GITHUB_OUTPUT"
+              echo "committed=$COMMITTED" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+              echo "error=$ERROR_MSG" >> "$GITHUB_OUTPUT"
+              echo "done=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "::warning::Hemingway job timed out after 15 minutes"
+          echo "api_ok=false" >> "$GITHUB_OUTPUT"
+          echo "done=true" >> "$GITHUB_OUTPUT"
+
+      - name: Post summary with full doc content
+        if: steps.poll.outputs.api_ok == 'true'
+        uses: actions/github-script@v7
+        env:
+          DOC_COUNT: ${{ steps.poll.outputs.doc_count }}
+          COMMITTED: ${{ steps.poll.outputs.committed }}
+          COMMIT_SHA: ${{ steps.poll.outputs.commit_sha }}
+        with:
+          script: |
+            const fs = require('fs');
+            const response = JSON.parse(fs.readFileSync('/tmp/hemingway_response.json', 'utf8'));
+            const data = response.data;
+            const docCount = parseInt(process.env.DOC_COUNT, 10);
+            const committed = process.env.COMMITTED === 'true';
+            const commitSha = process.env.COMMIT_SHA;
+
+            let body;
+
+            if (docCount === 0) {
+              body = '**Hemingway**: No documentation impact detected for this PR.';
+            } else {
+              const impactRows = (data.impact_details || []).map(d => {
+                const change = `${d.status} (+${d.additions}/-${d.deletions})`;
+                return `| ${d.source} | ${change} | ${d.doc_type} | \`${d.target}\` |`;
+              }).join('\n');
+
+              const impactTable = [
+                '| Source | Change | Type | Target |',
+                '|--------|--------|------|--------|',
+                impactRows
+              ].join('\n');
+
+              const repo = context.repo.owner + '/' + context.repo.repo;
+              const branch = data.head_branch || context.payload.pull_request.head.ref;
+
+              const docSections = (data.generated_docs || []).map(doc => {
+                const chars = (doc.content_length || 0).toLocaleString();
+                const fullContent = doc.content || doc.content_preview || '';
+                const blobUrl = `https://github.com/${repo}/blob/${branch}/${doc.path}`;
+                const rawUrl = `https://github.com/${repo}/blob/${commitSha}/${doc.path}`;
+                return [
+                  `### 📄 [\`${doc.path}\`](${blobUrl})`,
+                  `> ${chars} chars — record \`${doc.record_id}\` — [view rendered](${blobUrl}) · [view at commit](${rawUrl})`,
+                  '',
+                  '<details>',
+                  '<summary>Full content (click to expand)</summary>',
+                  '',
+                  fullContent,
+                  '',
+                  '</details>'
+                ].join('\n');
+              }).join('\n\n');
+
+              const shaNote = commitSha
+                ? ` [\`${commitSha.substring(0, 7)}\`](../commit/${commitSha})`
+                : '';
+              const statusLine = committed
+                ? `Committed ${docCount} doc(s) to this branch${shaNote}.`
+                : `Generated ${docCount} doc(s) (not committed).`;
+
+              body = [
+                '## 📚 Documentation Generated',
+                '',
+                statusLine,
+                '',
+                '### Impact Analysis',
+                impactTable,
+                '',
+                '---',
+                '',
+                docSections,
+                '',
+                '---',
+                '> **Review required**: The `hemingway/documentation` status check is pending.',
+                '> Approve this PR to mark documentation as accepted and unblock merge.'
+              ].join('\n');
+            }
+
+            const MARKER = 'Documentation Generated';
+            const NO_IMPACT = 'No documentation impact';
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              (c.body.includes(MARKER) || c.body.includes(NO_IMPACT) || c.body.includes('Documentation analysis'))
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+            }
+
+      - name: Post failure comment
+        if: steps.submit.outputs.api_ok == 'false' || (steps.poll.outputs.done == 'true' && steps.poll.outputs.api_ok != 'true')
+        uses: actions/github-script@v7
+        env:
+          ERROR_MSG: ${{ steps.poll.outputs.error }}
+        with:
+          script: |
+            const errorMsg = process.env.ERROR_MSG;
+            const detail = errorMsg ? `: ${errorMsg}` : ' — API did not respond.';
+            const body = `**Hemingway**: Documentation generation unavailable${detail}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number, owner: context.repo.owner,
+              repo: context.repo.repo, per_page: 100
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              (c.body.includes('Documentation Generated') || c.body.includes('documentation impact') || c.body.includes('Documentation generation'))
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number, owner: context.repo.owner,
+                repo: context.repo.repo, body: body
+              });
+            }
+
+  approve-docs:
+    if: >-
+      github.event_name == 'pull_request_review'
+      && github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Set documentation status to success
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const sha = pr.head.sha;
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: sha,
+              state: 'success',
+              context: 'hemingway/documentation',
+              description: 'Documentation reviewed and approved'
+            });
+
+            core.notice(`Set hemingway/documentation status to success on ${sha.substring(0, 7)}`);
