@@ -4,14 +4,17 @@
 # Requires: HYPATIA_API_URL secret (optional — defaults to https://hypatia.cn-agents.com)
 #
 # Flow:
-#   PR opened/updated → Hypatia generates docs → commits to PR branch → posts summary comment
-#   Approval gate is the PR review itself — reviewers see the generated docs in the diff.
+#   PR opened/updated → Hypatia generates docs → commits to PR branch →
+#   sets hypatia/documentation status to pending → posts full content in PR comment.
+#   PR review approved → sets status to success → merge unblocked.
 
 name: Generate Documentation
 
 on:
   pull_request:
     types: [opened, synchronize]
+  pull_request_review:
+    types: [submitted]
 
 concurrency:
   group: doc-gen-${{ github.event.pull_request.number }}
@@ -20,14 +23,16 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  statuses: write
 
 jobs:
   generate-docs:
     if: >-
-      github.actor != 'github-actions[bot]'
+      github.event_name == 'pull_request'
+      && github.actor != 'github-actions[bot]'
       && github.actor != 'scm-bot'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Submit doc generation job
@@ -83,10 +88,8 @@ jobs:
               DOC_COUNT=$(echo "$RESULT" | jq -r '.data.generated_docs | length // 0')
               COMMITTED=$(echo "$RESULT" | jq -r '.data.files_committed // false')
               COMMIT_SHA=$(echo "$RESULT" | jq -r '.data.commit_sha // empty')
-              IMPACT=$(echo "$RESULT" | jq -r '.data.impact_summary // "no impact"')
               ERROR_MSG=$(echo "$RESULT" | jq -r '.error // empty')
 
-              echo "::notice::Hypatia: $IMPACT"
               echo "api_ok=$OK" >> "$GITHUB_OUTPUT"
               echo "doc_count=$DOC_COUNT" >> "$GITHUB_OUTPUT"
               echo "committed=$COMMITTED" >> "$GITHUB_OUTPUT"
@@ -101,7 +104,7 @@ jobs:
           echo "api_ok=false" >> "$GITHUB_OUTPUT"
           echo "done=true" >> "$GITHUB_OUTPUT"
 
-      - name: Post summary comment
+      - name: Post summary with full doc content
         if: steps.poll.outputs.api_ok == 'true'
         uses: actions/github-script@v7
         env:
@@ -133,12 +136,22 @@ jobs:
                 impactRows
               ].join('\n');
 
-              const docList = (data.generated_docs || []).map(doc => {
+              const docSections = (data.generated_docs || []).map(doc => {
                 const chars = (doc.content_length || 0).toLocaleString();
-                return `- \`${doc.path}\` (${chars} chars) — record \`${doc.record_id}\``;
-              }).join('\n');
+                const fullContent = doc.content || doc.content_preview || '';
+                return [
+                  '<details>',
+                  `<summary><strong>${doc.path}</strong> (${chars} chars) — record <code>${doc.record_id}</code></summary>`,
+                  '',
+                  fullContent,
+                  '',
+                  '</details>'
+                ].join('\n');
+              }).join('\n\n');
 
-              const shaNote = commitSha ? ` [\`${commitSha.substring(0, 7)}\`](../commit/${commitSha})` : '';
+              const shaNote = commitSha
+                ? ` [\`${commitSha.substring(0, 7)}\`](../commit/${commitSha})`
+                : '';
               const statusLine = committed
                 ? `Committed ${docCount} doc(s) to this branch${shaNote}.`
                 : `Generated ${docCount} doc(s) (not committed).`;
@@ -151,11 +164,14 @@ jobs:
                 '### Impact',
                 impactTable,
                 '',
-                '### Files',
-                docList,
+                '### Generated Documents',
+                'Expand each section to review the full content:',
+                '',
+                docSections,
                 '',
                 '---',
-                '*Review the generated docs in this PR diff. Hypatia records are stored for traceability.*'
+                '> **Review required**: The `hypatia/documentation` status check is pending.',
+                '> Approve this PR to mark docs as accepted and unblock merge.'
               ].join('\n');
             }
 
@@ -217,3 +233,29 @@ jobs:
                 repo: context.repo.repo, body: body
               });
             }
+
+  approve-docs:
+    if: >-
+      github.event_name == 'pull_request_review'
+      && github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Set documentation status to success
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const sha = pr.head.sha;
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: sha,
+              state: 'success',
+              context: 'hypatia/documentation',
+              description: 'Documentation reviewed and approved'
+            });
+
+            core.notice(`Set hypatia/documentation status to success on ${sha.substring(0, 7)}`);
