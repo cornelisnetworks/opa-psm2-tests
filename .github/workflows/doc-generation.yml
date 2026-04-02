@@ -40,7 +40,7 @@ jobs:
         run: |
           HYPATIA_URL="${{ secrets.HYPATIA_API_URL }}"
           if [ -z "$HYPATIA_URL" ]; then
-            HYPATIA_URL="https://hypatia.cn-agents.com"
+            HYPATIA_URL="https://hemingway.cn-agents.com"
           fi
           echo "hypatia_url=$HYPATIA_URL" >> "$GITHUB_OUTPUT"
 
